@@ -19,7 +19,8 @@ from mpp.methods.tempo import tempo, ChargeIntent, TESTNET_CHAIN_ID, PATH_USD
 from mpp.errors import PaymentError, VerificationError
 
 from .config import CHARGE_AMOUNT, SESSION_AMOUNT, RECIPIENT
-from .session import SessionVerifier, Voucher
+from .session import SessionVerifier, Voucher, ESCROW_CONTRACT
+from .session_onchain import OnchainSessionServer
 
 app = FastAPI(title="MPP Demo Server", version="0.1.0")
 
@@ -88,6 +89,26 @@ mpp = Mpp.create(
 
 session_verifier = SessionVerifier()
 
+# ─── On-chain Session (escrow) ───────────────────────────────────────────────
+
+_onchain_session_server: OnchainSessionServer | None = None
+
+
+def _get_onchain_server() -> OnchainSessionServer:
+    """Lazily initialize on-chain session server (needs signer)."""
+    global _onchain_session_server
+    if _onchain_session_server is None:
+        server_key = os.getenv("MPP_SERVER_PRIVATE_KEY", "")
+        if not server_key:
+            raise ValueError(
+                "MPP_SERVER_PRIVATE_KEY required for on-chain session endpoints. "
+                "Set it to the server's (payee) private key."
+            )
+        from .signer import LocalSigner
+        signer = LocalSigner(server_key)
+        _onchain_session_server = OnchainSessionServer(signer=signer)
+    return _onchain_session_server
+
 # ─── Data ────────────────────────────────────────────────────────────────────
 
 JOKES = [
@@ -127,6 +148,10 @@ async def root():
             "/session/gallery": {"intent": "session", "price": "$0.005/image (voucher)"},
             "/session/topup": {"intent": "session", "method": "POST"},
             "/session/close": {"intent": "session", "method": "POST"},
+            "/session-onchain/info": {"intent": "session-onchain", "method": "GET"},
+            "/session-onchain/open": {"intent": "session-onchain", "method": "POST"},
+            "/session-onchain/gallery": {"intent": "session-onchain", "price": "$0.005/image (on-chain escrow)"},
+            "/session-onchain/close": {"intent": "session-onchain", "method": "POST (on-chain settle)"},
         },
         "protocol": "https://paymentauth.org",
     }
@@ -258,3 +283,103 @@ async def session_close(request: Request):
     if not result:
         return JSONResponse(status_code=404, content={"error": "channel_not_found"})
     return {"status": "closed", **result}
+
+
+# ─── On-chain Session Endpoints (real escrow) ────────────────────────────────
+
+@app.get("/session-onchain/info")
+async def session_onchain_info():
+    """Server info for on-chain session — exposes payee address."""
+    server = _get_onchain_server()
+    return {
+        "payee": server.signer.address,
+        "escrow": ESCROW_CONTRACT,
+        "price_per_image": SESSION_PRICE_PER_IMAGE,
+        "default_deposit": SESSION_DEFAULT_DEPOSIT,
+    }
+
+
+@app.post("/session-onchain/open")
+async def session_onchain_open(request: Request):
+    """Register a channel opened on-chain by the client.
+
+    Body: {"channel_id": "0x...", "payer": "0x...", "deposit": 1000000}
+
+    The client has already done the on-chain open tx.
+    Server just registers the channel for voucher verification.
+    """
+    body = await request.json()
+    channel_id = body.get("channel_id")
+    payer = body.get("payer")
+    deposit = body.get("deposit", SESSION_DEFAULT_DEPOSIT)
+
+    if not channel_id or not payer:
+        return JSONResponse(status_code=400, content={"error": "channel_id and payer required"})
+
+    server = _get_onchain_server()
+    channel = server.open_channel(channel_id, payer, deposit)
+    return {
+        "status": "opened",
+        "channel_id": channel.channel_id,
+        "payer": channel.payer,
+        "deposit": channel.deposit,
+        "price_per_image": SESSION_PRICE_PER_IMAGE,
+    }
+
+
+@app.post("/session-onchain/gallery")
+async def session_onchain_gallery(request: Request):
+    """On-chain session gallery — verify EIP-712 voucher (off-chain), serve image.
+
+    Body: {"channel_id": "0x...", "cumulative_amount": 5000,
+           "nonce": 1, "signature": "0x...", "signer": "0x..."}
+    """
+    body = await request.json()
+
+    voucher = Voucher(
+        channel_id=body["channel_id"],
+        cumulative_amount=body["cumulative_amount"],
+        nonce=body["nonce"],
+        signature=body["signature"],
+        signer=body["signer"],
+    )
+
+    server = _get_onchain_server()
+    ok, delta, err = server.verify_voucher(voucher)
+    if not ok:
+        return JSONResponse(status_code=402, content={"error": err, "detail": "Voucher verification failed"})
+
+    image = random.choice(GALLERY)
+    channel = server.get_channel(voucher.channel_id)
+    return {
+        "image": image,
+        "payer": voucher.signer,
+        "session": {
+            "channel_id": voucher.channel_id,
+            "delta": delta,
+            "cumulative_spent": channel.cumulative_verified if channel else 0,
+            "remaining": (channel.deposit - channel.cumulative_verified) if channel else 0,
+        },
+    }
+
+
+@app.post("/session-onchain/close")
+async def session_onchain_close(request: Request):
+    """Close on-chain session — server submits best voucher to escrow.
+
+    Body: {"channel_id": "0x..."}
+    """
+    body = await request.json()
+    channel_id = body.get("channel_id")
+    if not channel_id:
+        return JSONResponse(status_code=400, content={"error": "channel_id required"})
+
+    server = _get_onchain_server()
+    try:
+        result = await server.close_channel(channel_id)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"On-chain close failed: {e}"})
+
+    return {"status": "closed_onchain", **result}

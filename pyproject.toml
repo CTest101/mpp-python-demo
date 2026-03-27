@@ -8,6 +8,8 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
     "httpx>=0.27.0",
+    "eth-abi>=5.0.0",
+    "eth-utils>=4.0.0",
 ]
 
 [project.optional-dependencies]
