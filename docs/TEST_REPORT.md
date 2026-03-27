@@ -1,11 +1,12 @@
 # MPP Python Demo — E2E 详细过程报告
 
-- **运行时间**：2026-03-27
+- **运行时间**：2026-03-27T02:19:00Z
 - **平台**：Ubuntu 24.04 LTS, Python 3.14.3
 - **pympp**: 0.4.2 | **pytempo**: 0.4.0
 - **链**：Tempo Moderato Testnet (chain ID 42431)
 - **Token**: pathUSD (`0x20c0000000000000000000000000000000000000`, decimals=6)
-- **Escrow 合约**: `0xe1c4d3dce17bc111181ddf716f75bae49e61a336`
+- **Escrow 合约**: `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` (TempoStreamChannel)
+- **单元测试**: 56 passed
 
 ---
 
@@ -13,17 +14,19 @@
 
 | 角色 | Address | 用途 |
 |------|---------|------|
-| Payer (Client) | `0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D` | 付款方，签 voucher |
-| Payee (Server) | `0x5d8D22169d5759E7edDF32898138368D7dfd7d9f` | 收款方，链上 close |
-| Funded via | `tempo_fundAddress` RPC faucet | pathUSD |
+| Payer (Client) | `0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D` | 付款方，签 voucher，链上 open |
+| Payee (Server) | `0x5d8D22169d5759E7edDF32898138368D7dfd7d9f` | 收款方，验 voucher，链上 close |
+| Funded via | `tempo_fundAddress` RPC faucet | pathUSD testnet 代币 |
+
+**Signer 类型**: `LocalSigner`（async `sign_hash`）→ `SignerTempoMethod`（override pympp 内部签名）
 
 ---
 
 ## E2E 1: Charge — 官方 mpp.dev/api/ping/paid
 
-端到端耗时：**1492 ms**
+端到端耗时：**1922 ms**（首跳 202ms + 二跳 1720ms）
 
-### 时序图
+### 1.1 时序图
 
 ```mermaid
 sequenceDiagram
@@ -35,229 +38,463 @@ sequenceDiagram
 
     C->>S: GET /api/ping/paid (无 auth)
     S-->>C: 402 + WWW-Authenticate: Payment ...
-    Note over C: get_signing_hash() → signer.sign_hash() → fee payer envelope
+
+    Note over C: 解析 challenge → 构造 Tempo Transaction (type 0x76)<br/>→ tx.get_signing_hash() → signer.sign_hash() → fee payer envelope (0x78)
     C->>S: GET /api/ping/paid + Authorization: Payment ...
     S->>F: forward fee payer envelope
-    F->>T: broadcast co-signed tx
-    T-->>S: receipt verified
+    F->>T: co-sign + broadcast
+    T-->>F: tx receipt
+    F-->>S: verified
     S-->>C: 200 + Payment-Receipt
 ```
 
-### Step 1: 402 Challenge
+### 1.2 首跳：获取 Challenge
 
-**Request**: `GET https://mpp.dev/api/ping/paid`
-**Response**: `402 Payment Required` (240ms)
+- **Method**: `GET`
+- **URL**: `https://mpp.dev/api/ping/paid`
+- **响应状态**: `402 Payment Required`
+- **耗时**: 202 ms
 
+**响应 Headers**:
+```http
+HTTP/2 402
+cache-control: no-store
+content-type: application/problem+json
+www-authenticate: Payment id="oek3wtgk71iy19JDrKi_w3sQvHZv7KcyoVmuVqdCXo8",
+  realm="mpp.sh", method="tempo", intent="charge",
+  request="eyJhbW91bnQiOiIxMDAwMDAi...",
+  description="Ping endpoint access",
+  expires="2026-03-27T02:24:07.636Z"
 ```
-WWW-Authenticate: Payment id="UxRga...", realm="mpp.sh", method="tempo",
-  intent="charge", request="eyJh...", expires="2026-03-27T01:12:06.748Z"
+
+**Body (RFC 9457 Problem Details)**:
+```json
+{
+  "type": "https://paymentauth.org/problems/payment-required",
+  "title": "Payment Required",
+  "status": 402,
+  "detail": "Payment is required (Ping endpoint access).",
+  "challengeId": "oek3wtgk71iy19JDrKi_w3sQvHZv7KcyoVmuVqdCXo8"
+}
 ```
 
-**Challenge request 解码**:
+**Challenge `request` 解码** (base64url → JSON):
 ```json
 {
   "amount": "100000",
   "currency": "0x20c0000000000000000000000000000000000000",
-  "methodDetails": { "chainId": 42431, "feePayer": true },
+  "methodDetails": {
+    "chainId": 42431,
+    "feePayer": true
+  },
   "recipient": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 }
 ```
 
-- `amount`: 100000 = **$0.10 pathUSD**
-- `feePayer: true` — 服务端赞助 gas
+**关键字段解释**:
+| 字段 | 值 | 含义 |
+|------|------|------|
+| `id` | `oek3wtgk...` | HMAC-SHA256 challenge ID（服务端无状态验证） |
+| `realm` | `mpp.sh` | 服务端标识 |
+| `method` | `tempo` | Tempo 支付方式 |
+| `intent` | `charge` | 一次性支付 |
+| `amount` | `100000` | 0.10 pathUSD（6 decimals） |
+| `currency` | `0x20c0...` | pathUSD 合约地址 |
+| `chainId` | `42431` | Tempo Moderato Testnet |
+| `feePayer` | `true` | 服务端赞助 gas |
+| `recipient` | `0xf39F...` | Tempo 官方收款地址 |
+| `expires` | `2026-03-27T02:24:07.636Z` | 5 分钟有效期 |
 
-### Step 2-4: 签名 → 提交 → 验证
+### 1.3 从 Challenge 构造待签名交易
 
-**SignerTempoMethod 签名流程**:
-1. `get_tx_params()` → chain_id=42431, nonce, gas_price
-2. 构造 `TempoTransaction(type=0x76)` + TIP-20 `transferWithMemo` calldata
-3. `tx.get_signing_hash(for_fee_payer=False)` → 32-byte digest
-4. `signer.sign_hash(digest)` → 65-byte signature ⭐
-5. `attrs.evolve(tx, sender_signature=sig)` → fee payer envelope (0x78)
+`SignerTempoMethod._build_with_signer()` 执行：
 
-### Step 5: 200 + Receipt
-
+**Step 1: 获取链上参数** (RPC: `https://rpc.moderato.tempo.xyz`)
+```python
+chain_id, nonce, gas_price = await get_tx_params(rpc_url, signer.address)
+# → (42431, on_chain_nonce, current_gas_price)
 ```
-Body: tm! thanks for paying
-Receipt: {
-  "method": "tempo", "status": "success",
-  "reference": "0xdc15c1fcad6b603e80c40c0eacfe253d93233b746c345902df2a03f6a17a04c8"
+
+**Step 2: 构造 TIP-20 transferWithMemo calldata**
+```
+Selector: 0x95777d59 = keccak256("transferWithMemo(address,uint256,bytes32)")[:4]
+Parameters:
+  to:     0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266  (recipient)
+  amount: 100000                                        (0.10 pathUSD)
+  memo:   attribution_hash                              (server_id + client_id)
+```
+
+**Step 3: 构造 TempoTransaction** (feePayer 模式)
+```python
+tx = TempoTransaction.create(
+    chain_id=42431,
+    gas_limit=1000000,
+    max_fee_per_gas=gas_price,
+    max_priority_fee_per_gas=gas_price,
+    nonce=0,                     # expiring nonce
+    nonce_key=2**256 - 1,        # U256::MAX (expiring nonce key)
+    fee_token=None,              # feePayer 模式下由服务端设定
+    awaiting_fee_payer=True,
+    valid_before=now + 25,       # 25 秒有效窗口
+    calls=(Call(to=pathUSD, value=0, data=transfer_calldata),),
+)
+```
+
+**Step 4: 获取 signing hash**
+```python
+signing_hash = tx.get_signing_hash(for_fee_payer=False)
+# = keccak256(0x76 || RLP([chainId, maxPriorityFee, maxFee, gasLimit,
+#   calls, accessList, nonceKey, nonce, validBefore, validAfter,
+#   b"", 0x00, tempoAuthList]))
+# → 32 bytes
+```
+
+**Step 5: Signer 签名** ⭐
+```python
+sig_bytes = await signer.sign_hash(signing_hash)
+# LocalSigner: Account.unsafe_sign_hash(hash)
+# → 65 bytes (r(32) + s(32) + v(1))
+```
+
+**Step 6: 构造 fee payer envelope**
+```python
+sig = Signature.from_bytes(sig_bytes)
+signed_tx = attrs.evolve(tx, sender_signature=sig, sender_address=signer.address)
+envelope = encode_fee_payer_envelope(signed_tx)
+# → 0x78 prefix + RLP([tx_fields, sender_address, sender_signature])
+```
+
+### 1.4 二跳：提交 Credential
+
+pympp `Client` 封装为 `Credential`:
+```python
+Credential(
+    challenge=challenge.to_echo(),   # 回显 challenge 参数（含 HMAC ID）
+    payload={
+        "type": "transaction",
+        "signature": "0x78..."       # fee payer envelope hex
+    },
+    source="did:pkh:eip155:42431:0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D"
+)
+```
+
+序列化为 `Authorization: Payment ...` header，重试请求。
+
+**服务端验证流程**:
+1. 解析 `Authorization` header → `Credential`
+2. 验证 challenge echo 的 HMAC（无状态验证 challenge 完整性）
+3. 解码 fee payer envelope → ecrecover 恢复 sender 地址
+4. 设定 fee_token → co-sign as fee payer → 广播到 Tempo Moderato
+5. 轮询 receipt → 验证 Transfer log
+
+### 1.5 结算结果
+
+- **响应状态**: `200`
+- **耗时**: 1720 ms
+- **Body**: `tm! thanks for paying`
+
+**Payment-Receipt 解码**:
+```json
+{
+  "method": "tempo",
+  "status": "success",
+  "timestamp": "2026-03-27T02:21:49.345Z",
+  "reference": "0x7e6b0a21c3282a812a31c96edcb8082ea02184c80ef9ad4d5d1552861d0f2279"
 }
 ```
+
+**链上核验**:
+- **txHash**: `0x7e6b0a21c3282a812a31c96edcb8082ea02184c80ef9ad4d5d1552861d0f2279`
+- **Explorer**: <https://explore.testnet.tempo.xyz/tx/0x7e6b0a21c3282a812a31c96edcb8082ea02184c80ef9ad4d5d1552861d0f2279>
+- **实际转账**: 0.10 pathUSD from `0x76BFc4B2...` → `0xf39Fd6e5...`
 
 ---
 
 ## E2E 2: Charge — 本地 Server /joke
 
-端到端耗时：**1230 ms** | 无 feePayer（Client 自付 gas）
+端到端耗时：**1826 ms**（首跳 3ms + 二跳 1823ms）
 
-**签名差异**:
+### 2.1 首跳：获取 Challenge
+
+- **URL**: `http://localhost:8801/joke`
+- **响应状态**: `402`
+- **耗时**: 3 ms
+
+```
+WWW-Authenticate: Payment id="MxaJ3VOpdo2UjJ83bp5Ff0SiEu_49hg_JcYtRuuf2FM",
+  realm="localhost", method="tempo", intent="charge",
+  request="...", description="One programmer joke ($0.01)",
+  expires="..."
+```
+
+**Challenge request 解码**:
+```json
+{
+  "amount": "10000",
+  "currency": "0x20c0000000000000000000000000000000000000",
+  "methodDetails": { "chainId": 42431 },
+  "recipient": "0x5d8D22169d5759E7edDF32898138368D7dfd7d9f"
+}
+```
+
+- `amount`: 10000 = **$0.01 pathUSD**
+- **无 feePayer** → Client 自付 gas
+- `fee_token` 设为 pathUSD（用稳定币付 gas）
+
+### 2.2 签名差异（vs E2E 1）
+
 | 维度 | E2E 1 (mpp.dev) | E2E 2 (local) |
 |------|-----------------|---------------|
-| feePayer | true | false |
-| nonce_key | 2^256-1 (expiring) | 0 (sequential) |
-| fee_token | None (server 设定) | pathUSD |
-| 输出格式 | 0x78 envelope | 0x76 signed tx |
+| feePayer | `true` (服务端赞助 gas) | `false` (Client 自付) |
+| nonce_key | `2^256 - 1` (expiring) | `0` (normal sequential) |
+| nonce | `0` (expiring) | 链上实际 nonce |
+| fee_token | `None` (server 设定) | pathUSD |
+| 输出格式 | fee payer envelope (0x78) | signed tx (0x76) |
+| Server 验证 | fee payer co-sign + broadcast | 直接 `eth_sendRawTransaction` |
 
-**结果**: `HTTP 200` → joke + receipt
+### 2.3 结算结果
+
+```
+Status: 200 (1823ms)
+Joke: Debugging: removing bugs. Programming: adding them.
+Payer: did:pkh:eip155:42431:0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D
+```
+
+**Receipt**:
+```json
+{
+  "method": "tempo",
+  "reference": "0xe4a161f24211960c8ee8a2705343e0ba78907fcc88ad992f34e35e042f0ac615",
+  "status": "success",
+  "timestamp": "2026-03-27T02:21:51.216036Z"
+}
+```
+
+**Explorer**: <https://explore.testnet.tempo.xyz/tx/0xe4a161f24211960c8ee8a2705343e0ba78907fcc88ad992f34e35e042f0ac615>
 
 ---
 
-## E2E 3: Session (Off-chain) — 本地 Server
+## E2E 3: Session On-chain — 真实 TempoStreamChannel Escrow
 
-端到端耗时：**23 ms** | 链上交易：**0 笔**
+端到端耗时：**~8.5s** (open 2869ms + register 2ms + 3 vouchers 16ms + close 2610ms)
+链上交易：**2 笔**（open + close）| Off-chain 验证：**3 次** (ecrecover, ~5ms each)
 
-Voucher 签名使用 `compute_voucher_digest()`（手动计算，与合约 `getVoucherDigest()` 输出完全一致）。
-
-### 流程
-
-1. `POST /session/open` (6ms) → 开通 channel（内存模拟 deposit $1.00）
-2. 3× `POST /session/gallery` (5-6ms each) → sign voucher → ecrecover → 返回图片
-3. `POST /session/close` (1ms) → 结算
-
-每个 voucher 验证只需 ecrecover（~3.7ms CPU），零链上调用。
-
----
-
-## E2E 4: Session (On-chain) — 真实 TempoStreamChannel Escrow ⭐
-
-端到端耗时：**~8s** (open 2.8s + 3 vouchers ~18ms + close 2.7s)
-链上交易：**2 笔**（open + close）
-
-### 时序图
+### 3.1 时序图
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as Client (Payer)
     participant S as Server (Payee)
-    participant E as Escrow Contract
-    participant T as Tempo Moderato
+    participant E as Escrow (0xe1c4d3dc...)
+    participant T as Tempo Moderato (42431)
 
-    C->>T: Tempo TX: approve(escrow, $1) + open(payee, pathUSD, $1, salt, 0x0)
-    T-->>C: tx receipt (channel opened)
+    C->>T: Tempo TX [Call1: pathUSD.approve(escrow, $1) | Call2: escrow.open(payee, pathUSD, $1, salt, 0x0)]
+    T->>E: open() → transferFrom(payer, escrow, $1) → emit ChannelOpened
+    T-->>C: tx receipt (2869ms)
     C->>S: POST /session-onchain/open {channel_id, payer, deposit}
-    S-->>C: 200 {status: "opened"}
+    S-->>C: 200 (2ms)
 
-    loop 3 vouchers (off-chain)
-        Note over C: compute_voucher_digest(channelId, cumulativeAmount)<br/>→ signer.sign_hash(digest) → 65 bytes
-        C->>S: POST /session-onchain/gallery {voucher}
-        Note over S: ecrecover(digest, signature) == payer? → ✅
-        S-->>C: 200 {image, session}
+    loop 3 vouchers (off-chain, zero chain calls)
+        Note over C: digest = keccak256(0x1901 || DOMAIN_SEPARATOR || structHash)<br/>structHash = keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, cumulativeAmount))<br/>sig = signer.sign_hash(digest)
+        C->>S: POST /session-onchain/gallery {channel_id, cumulative_amount, nonce, signature, signer}
+        Note over S: ecrecover(digest, signature) == channel.payer → ✅<br/>cumulative_amount > last_verified → ✅<br/>cumulative_amount <= deposit → ✅
+        S-->>C: 200 {image, session} (5-6ms)
     end
 
     C->>S: POST /session-onchain/close {channel_id}
     S->>T: Tempo TX: escrow.close(channelId, 15000, best_signature)
-    T->>E: verify voucher → transfer $0.015 to payee → refund $0.985 to payer
-    T-->>S: tx receipt
-    S-->>C: 200 {status: "closed_onchain", close_tx}
+    T->>E: close() → ecrecover(voucher) → transfer $0.015 to payee → refund $0.985 to payer
+    T-->>S: tx receipt (2610ms)
+    S-->>C: 200 {status, close_tx, total_spent, refund}
 ```
 
-### Step 1: 链上 Open (approve + open batched)
+### 3.2 Step 1: 获取 Server 信息
 
-**Tempo Transaction** (type 0x76, 2 calls batched):
 ```
-Call 1: pathUSD.approve(escrow, 1000000)
-  to:   0x20c0000000000000000000000000000000000000
-  data: 0x095ea7b3 + escrow_padded + amount_padded
-
-Call 2: escrow.open(payee, pathUSD, 1000000, salt, 0x0)
-  to:   0xe1c4d3dce17bc111181ddf716f75bae49e61a336
-  data: 0xc79ea485 + payee + token + deposit + salt + authorizedSigner
+GET /session-onchain/info → 200
 ```
-
-**签名**: `tx.get_signing_hash() → signer.sign_hash() → Signature → evolve`
-**结果**: TX `0xd9e089743cf98551...` | Channel: `0x3f9b500e6d0ee2b0...`
-**耗时**: ~2800ms
-**Explorer**: https://explore.testnet.tempo.xyz/tx/0xd9e089743cf98551ce4559c12a8ae3e3a26ef92c31403f4d82f74eba95536b2f
-
-### Step 2: Server 注册 Channel
-
-`POST /session-onchain/open` → Server 记录 channel_id/payer/deposit
-
-### Step 3: Off-chain Voucher 签名 (×3)
-
-**EIP-712 Domain** (与合约 `domainSeparator()` 输出完全一致):
 ```json
 {
-  "name": "Tempo Stream Channel",
-  "version": "1",
-  "chainId": 42431,
-  "verifyingContract": "0xe1c4d3dce17bc111181ddf716f75bae49e61a336"
+  "payee": "0x5d8D22169d5759E7edDF32898138368D7dfd7d9f",
+  "escrow": "0xe1c4d3dce17bc111181ddf716f75bae49e61a336",
+  "price_per_image": 5000,
+  "default_deposit": 1000000
 }
 ```
 
-**Voucher TYPEHASH** (与合约 `VOUCHER_TYPEHASH` 完全一致):
+### 3.3 Step 2: 链上 Open (approve + open batched)
+
+**Tempo Transaction** (type 0x76, 2 calls batched in 1 tx):
+
 ```
-keccak256("Voucher(bytes32 channelId,uint128 cumulativeAmount)")
-= 0xe97c93f01d3ef8eaba1586553df13308f236815bf4ea49c7b696895d8f5ea68a
+Call 1: pathUSD.approve(escrow, 1000000)
+  to:       0x20c0000000000000000000000000000000000000 (pathUSD)
+  selector: 0x095ea7b3 = approve(address,uint256)
+  args:     escrow_address(32B) + amount(32B)
+
+Call 2: escrow.open(payee, token, deposit, salt, authorizedSigner)
+  to:       0xe1c4d3dce17bc111181ddf716f75bae49e61a336 (escrow)
+  selector: 0xc79ea485 = open(address,address,uint128,bytes32,address)
+  args:     payee(32B) + token(32B) + deposit(32B) + salt(32B) + 0x0(32B)
+```
+
+**Salt**: `0xccfba8006112bdaef37adf274fc4d132e00be7e30a02c5eedafaea72f84035a6`
+
+**签名流程**:
+```python
+tx = TempoTransaction.create(
+    chain_id=42431,
+    gas_limit=2000000,           # 1M per call × 2 calls
+    fee_token=PATH_USD_ADDRESS,  # 用 pathUSD 付 gas
+    calls=(approve_call, open_call),
+    ...
+)
+signing_hash = tx.get_signing_hash(for_fee_payer=False)
+sig_bytes = await signer.sign_hash(signing_hash)    # ⭐ LocalSigner
+signed_tx = attrs.evolve(tx, sender_signature=Signature.from_bytes(sig_bytes), ...)
+raw_hex = "0x" + signed_tx.encode().hex()
+tx_hash = await eth_sendRawTransaction(raw_hex)
+```
+
+**结果**:
+- **TX**: `0x180631457f389dd6e02adff69a043ede35aa320fff61b0a4058fc8786669cbc0`
+- **Channel ID**: `0xce21255bd407318a6b4a5f20b420460f41dc83162cda4a01b21ba1e6e8dfba8d`
+- **耗时**: 2869ms
+- **Explorer**: <https://explore.testnet.tempo.xyz/tx/0x180631457f389dd6e02adff69a043ede35aa320fff61b0a4058fc8786669cbc0>
+
+**Digest 验证**（确认我们的 EIP-712 与合约一致）:
+```
+Contract getVoucherDigest(channelId, 5000): 0xe6344ed5a6a375cd...
+Local compute_voucher_digest(channelId, 5000): 0xe6344ed5a6a375cd...
+Match: ✅
+```
+
+### 3.4 Step 3: 注册 Channel
+
+```
+POST /session-onchain/open → 200 (2ms)
+```
+Server 记录 channel_id/payer/deposit 用于后续 voucher 验证。
+
+### 3.5 Step 4: Off-chain Voucher 签名与验证
+
+**EIP-712 常量** (与合约完全一致):
+
+```
+VOUCHER_TYPEHASH: 0xe97c93f01d3ef8eaba1586553df13308f236815bf4ea49c7b696895d8f5ea68a
+  = keccak256("Voucher(bytes32 channelId,uint128 cumulativeAmount)")
+
+DOMAIN_SEPARATOR: 0x3271aa2ef112b8493e889b17f852ad8e0a0b30565a62f3c066aa9fb0b7444e0c
+  = keccak256(abi.encode(
+      EIP712Domain_typehash,
+      keccak256("Tempo Stream Channel"),
+      keccak256("1"),
+      42431,
+      0xe1c4d3dce17bc111181ddf716f75bae49e61a336
+  ))
 ```
 
 **Digest 计算** (`compute_voucher_digest()`):
 ```python
 struct_hash = keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, cumulativeAmount))
-digest = keccak256(0x1901 || DOMAIN_SEPARATOR || struct_hash)
+digest = keccak256(b"\x19\x01" + DOMAIN_SEPARATOR + struct_hash)
+sig_bytes = await signer.sign_hash(digest)  # 65 bytes
 ```
 
-**已验证**: `compute_voucher_digest()` 输出 = 合约 `getVoucherDigest()` 输出 ✅
+**3 个 Voucher 的完整数据**:
 
-| Voucher | cumulativeAmount | 耗时 | Signature |
-|---------|-----------------|------|-----------|
-| #1 | 5000 ($0.005) | 6ms | `0x47b5af...4c747d1c` |
-| #2 | 10000 ($0.010) | 5ms | `0xe8f6ea...8076231c` |
-| #3 | 15000 ($0.015) | 6ms | `0x3f00b8...3e85f71c` |
+| # | cumulativeAmount | Digest (前 16 hex) | Signature | Server 验证耗时 |
+|---|-----------------|-------------------|-----------|------------|
+| 1 | 5000 ($0.005) | `e6344ed5a6a375cd` | `0xcf6332aeb1e0820c...aec8211c` | 6ms |
+| 2 | 10000 ($0.010) | `482cfb341309a22f` | `0x2d6a51fb3e6e3a67...1277e81b` | 5ms |
+| 3 | 15000 ($0.015) | `330b07f4592b6c8d` | `0x96d4b14b2652dda9...95b4111c` | 5ms |
 
-**Server 验证**: ecrecover(digest, sig) == payer address → ✅
+**Server 验证流程** (每次 ~5ms, 纯 CPU):
+1. `channel = channels[voucher.channel_id]` → 存在 ✅
+2. `voucher.nonce > channel.last_nonce` → 递增 ✅
+3. `voucher.cumulative_amount > channel.cumulative_verified` → 递增 ✅
+4. `voucher.cumulative_amount <= channel.deposit` → 未超限 ✅
+5. `digest = compute_voucher_digest(channelId, cumulativeAmount)` → 32 bytes
+6. `recovered = Account._recover_hash(digest, signature)` → ecrecover
+7. `recovered == channel.payer` → 签名匹配 ✅
+8. 更新 `cumulative_verified`, `last_nonce`, `best_signature`
 
-### Step 4: 链上 Close
+### 3.6 Step 5: 链上 Close
 
-Server 提交 **最高累积 voucher** (`cumulativeAmount=15000`, `signature=best_signature`) 给 escrow 合约。
+Server 提交 **最高累积 voucher** (cumulativeAmount=15000, best_signature) 给 escrow 合约。
 
 **Tempo Transaction**:
 ```
 escrow.close(channelId, 15000, signature)
-  → verify voucher (contract-side ecrecover)
-  → transfer 15000 ($0.015) pathUSD to payee
-  → refund 985000 ($0.985) pathUSD to payer
+  selector: close(bytes32,uint128,bytes)
 ```
+
+**合约内部执行**:
+1. `msg.sender == channel.payee` → `0x5d8D22...` ✅
+2. `cumulativeAmount > channel.settled` → 15000 > 0 ✅
+3. `cumulativeAmount <= channel.deposit` → 15000 ≤ 1000000 ✅
+4. `structHash = keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, 15000))`
+5. `digest = _hashTypedData(structHash)` → EIP-712 digest
+6. `signer = ECDSA.recoverCalldata(digest, signature)` → ecrecover
+7. `signer == channel.payer` → `0x76BFc4B2...` ✅
+8. `delta = 15000 - 0 = 15000` → transfer 15000 pathUSD to payee
+9. `refund = 1000000 - 15000 = 985000` → transfer 985000 pathUSD to payer
+10. `emit ChannelClosed(...)`
 
 **结果**:
 ```json
 {
   "status": "closed_onchain",
+  "channel_id": "0xce21255bd407318a6b4a5f20b420460f41dc83162cda4a01b21ba1e6e8dfba8d",
   "total_spent": 15000,
   "refund": 985000,
-  "close_tx": "0x4cf4d02b57b5b1b799a7cb75a1a4da7e67bfa734b2b56160e319ddd1d55b94e2"
+  "payer": "0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D",
+  "best_signature": "0x96d4b14b2652dda953e79780f9684153eb5c4a6727c5da894b49a95a25e82c2e3d7a053abe9b065a75e229437b0d36555aa07c85de3575b4c376ef371395b4111c",
+  "tx_hash": "0x0347003621f67baa7d8e42e1dd94bbe3609e008e6caba2999a486dfb5b59ad8a"
 }
 ```
 
-**Explorer**: https://explore.testnet.tempo.xyz/tx/0x4cf4d02b57b5b1b799a7cb75a1a4da7e67bfa734b2b56160e319ddd1d55b94e2
+- `total_spent`: 15000 = **$0.015** (3 images × $0.005)
+- `refund`: 985000 = **$0.985** ($1.000 - $0.015)
+- **Close TX**: <https://explore.testnet.tempo.xyz/tx/0x0347003621f67baa7d8e42e1dd94bbe3609e008e6caba2999a486dfb5b59ad8a>
+- **Open TX**: <https://explore.testnet.tempo.xyz/tx/0x180631457f389dd6e02adff69a043ede35aa320fff61b0a4058fc8786669cbc0>
 
 ---
 
 ## 性能对比
 
-| 维度 | Charge (E2E 1/2) | Session Off-chain (E2E 3) | Session On-chain (E2E 4) |
-|------|-------------------|---------------------------|--------------------------|
-| 单次请求延迟 | ~1200-1500 ms | **5-6 ms** | **5-6 ms** (voucher) |
-| 链上交易 | 每次 1 笔 | **0 笔** | **2 笔** (open + close) |
-| 总耗时 (3 requests) | ~4.5s | **23ms** | **~8s** (含 open/close) |
-| 验证方式 | 链上 receipt | ecrecover | ecrecover + 链上 settle |
-| 适用场景 | 单次购买 | 高频 API (demo) | 高频 API (production) |
+| 维度 | Charge (E2E 1/2) | Session On-chain (E2E 3) |
+|------|-------------------|--------------------------|
+| 单次请求延迟 | ~1700-1800 ms | **5-6 ms** (voucher) |
+| 链上交易 | 每次 1 笔 | 2 笔 (open + close) |
+| 3 requests 总耗时 | ~5.4s (3 × 1.8s) | **16ms** (3 × ~5ms) |
+| 含 open/close 总耗时 | — | ~8.5s |
+| 验证方式 | 链上 receipt + Transfer log | ecrecover (CPU-bound) |
+| Gas per request | ~270K each | **0** (仅 open/close) |
+| 适用场景 | 单次购买 | 高频 API / per-token LLM |
+
+### Benchmark (100 vouchers)
+```
+Sign:   2.5 ms/voucher
+Verify: 3.7 ms/voucher
+Total:  6.2 ms/round-trip
+```
 
 ---
 
 ## 安全属性
 
-| 属性 | Charge | Session (Off/On-chain) |
-|------|--------|------------------------|
+| 属性 | Charge | Session On-chain |
+|------|--------|-----------------|
 | 防重放 | challenge HMAC + nonce | 累积金额递增 + app nonce |
-| 身份验证 | 链上 from 地址 | ecrecover = payer |
-| 金额上限 | 单次 challenge 金额 | escrow deposit |
-| 时间限制 | challenge expires 5min | channel 生命周期 + close grace |
-| 签名绑定 | EIP-712 (Tempo tx hash) | EIP-712 (escrow domainSeparator) |
-| 链上结算 | 每次 | close 时批量 |
-| 密钥隔离 | Signer.sign_hash() | 同一 Signer.sign_hash() |
+| 身份验证 | 链上 from 地址 | ecrecover = payer (off-chain) + contract ecrecover (on-chain close) |
+| 金额上限 | 单次 challenge 金额 | escrow deposit (链上锁定) |
+| 时间限制 | challenge expires 5min | channel 生命周期 + 15min close grace period |
+| 签名绑定 | EIP-712 (Tempo tx hash) | EIP-712 (escrow domainSeparator + VOUCHER_TYPEHASH) |
+| 链上结算 | 每次请求 | close 时批量 1 笔 |
+| 退款保障 | — | escrow 合约自动退 refund |
+| 密钥隔离 | `Signer.sign_hash()` | 同一 `Signer.sign_hash()` |
 
 ---
 
@@ -272,9 +509,9 @@ escrow.close(channelId, 15000, signature)
 | eth-account | 0.13+ |
 | eth-abi | 5.0+ |
 | Chain | Tempo Moderato Testnet (42431) |
-| Token | pathUSD (0x20c0..., 6 decimals) |
-| Escrow | 0xe1c4d3dce17bc111181ddf716f75bae49e61a336 |
-| RPC | https://rpc.moderato.tempo.xyz |
+| Token | pathUSD (`0x20c0...`, 6 decimals) |
+| Escrow | `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` |
+| RPC | `https://rpc.moderato.tempo.xyz` |
 | Official server | mpp.dev (Vercel) |
 | Local server | FastAPI + uvicorn (127.0.0.1) |
-| Unit tests | 56 passed |
+| Unit tests | 56 passed (1.82s) |
