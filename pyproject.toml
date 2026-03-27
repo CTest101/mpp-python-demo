@@ -1,0 +1,25 @@
+[project]
+name = "mpp-python-demo"
+version = "0.1.0"
+description = "MPP (Machine Payments Protocol) Python demo with abstract signer"
+requires-python = ">=3.12"
+dependencies = [
+    "pympp[tempo]>=0.4.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "anyio[trio]>=4.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mpp_demo"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
