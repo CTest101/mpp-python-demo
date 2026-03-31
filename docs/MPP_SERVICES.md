@@ -2,11 +2,24 @@
 
 > Auto-generated from <https://mpp.dev/api/services> — 83 services
 > All services use HTTP 402 Payment Authentication Scheme
-> Chain: Tempo (mainnet 4217 / testnet 42431) | Currency: USDC / pathUSD
+> Discovery API: `GET https://mpp.dev/api/services` | Agent docs: <https://mpp.dev/services/llms.txt>
+
+## Network & Currency
+
+| Network | Chain ID | Currency | Address | Decimals | Method |
+|---------|----------|----------|---------|----------|--------|
+| **Tempo Mainnet** | 4217 | USDC | `0x20c000000000000000000000b9537d11c60e8b50` | 6 | tempo |
+| **Tempo Testnet** (Moderato) | 42431 | pathUSD | `0x20c0000000000000000000000000000000000000` | 6 | tempo |
+| **Stripe** (fiat) | — | USD | — | 2 | stripe |
+
+- **80 services** use Tempo method with USDC on mainnet (chainId 4217)
+- **3 services** use Stripe method with USD (Prospect Butcher, Tako, Stripe Climate)
+- **Testnet (42431)** is only used by self-hosted demo servers, not production services
+- Session escrow: `0x33b901018174DDabE4841042ab76ba85D4e24f25` (mainnet) / `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` (testnet)
 
 ## Session Services (9)
 
-Payment channel mode — open once, pay per request with off-chain vouchers (~5ms).
+Payment channel — open once, pay per request with off-chain vouchers (~5ms). All on **Tempo Mainnet (4217) USDC**.
 
 | Service | URL | Intents | Category |
 |---------|-----|---------|----------|
@@ -23,95 +36,95 @@ Payment channel mode — open once, pay per request with off-chain vouchers (~5m
 ### Alchemy
 > Blockchain data APIs including Core RPC APIs, Prices API, Portfolio API, and NFT API across 100+ chains.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/:network/v2` | $0.0001 | JSON-RPC call (eth_*, alchemy_*) |
-| GET | `/:network/nft/v3/:endpoint` | $0.0005 | NFT API v3 |
-| POST | `/:network/nft/v3/:endpoint` | $0.0005 | NFT API v3 |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/:network/v2` | session | $0.0001 | JSON-RPC call (eth_*, alchemy_*) |
+| GET | `/:network/nft/v3/:endpoint` | session | $0.0005 | NFT API v3 |
+| POST | `/:network/nft/v3/:endpoint` | session | $0.0005 | NFT API v3 |
 
 ### Anthropic
 > Claude chat completions (Sonnet, Opus, Haiku) via native and OpenAI-compatible APIs.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/v1/messages` | dynamic | Create messages with Claude (Sonnet, Opus, Haiku) - price varies by model |
-| POST | `/v1/chat/completions` | dynamic | OpenAI-compatible chat completions (auto-converted to Anthropic format) |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/v1/messages` | session | dynamic | Create messages with Claude (Sonnet, Opus, Haiku) - price varies by model |
+| POST | `/v1/chat/completions` | session | dynamic | OpenAI-compatible chat completions (auto-converted to Anthropic format) |
 
 ### Dune
 > Query across raw transaction data, decoded smart contract events, stablecoin flows, RWA tracking, protocol analytics, DeFi positions, NFT activity, blockchain market research, and whatever is trending in crypto.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/api/v1/sql/execute` | $0.05-$4 | Execute a SQL query |
-| GET | `/api/v1/execution/:execution_id/csv` | $0.05-$10 | Download CSV results for an execution |
-| GET | `/api/v1/execution/:execution_id/results` | $0.05-$10 | Fetch JSON results for an execution |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/api/v1/sql/execute` | session | $0.05-$4 | Execute a SQL query |
+| GET | `/api/v1/execution/:execution_id/csv` | session | $0.05-$10 | Download CSV results for an execution |
+| GET | `/api/v1/execution/:execution_id/results` | session | $0.05-$10 | Fetch JSON results for an execution |
 
 ### Google Gemini
 > Gemini text generation, Veo video, and Nano Banana image generation with model-tier pricing.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/:version/models/*` | $0.0005 | Generate content (Gemini, Veo, Imagen, etc.) - price varies by model |
-| GET | `/:version/operations/*` | $0.0001 | Poll async operation status |
-| POST | `/:version/files` | $0.0010 | Upload file for multimodal input |
-| GET | `/:version/models` | free | List available models (free) |
-| GET | `/:version/models/*` | free | Get model details (free) |
-| GET | `/:version/files` | free | List uploaded files (free) |
-| GET | `/:version/files/*` | free | Get file details (free) |
-| DELETE | `/:version/files/*` | free | Delete an uploaded file (free) |
-| GET | `/:version/cachedContents` | free | List cached contents (free) |
-| GET | `/:version/cachedContents/*` | free | Get cached content details (free) |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/:version/models/*` | session | $0.0005 | Generate content (Gemini, Veo, Imagen, etc.) - price varies by model |
+| GET | `/:version/operations/*` | session | $0.0001 | Poll async operation status |
+| POST | `/:version/files` | session | $0.0010 | Upload file for multimodal input |
+| GET | `/:version/models` |  | free | List available models (free) |
+| GET | `/:version/models/*` |  | free | Get model details (free) |
+| GET | `/:version/files` |  | free | List uploaded files (free) |
+| GET | `/:version/files/*` |  | free | Get file details (free) |
+| DELETE | `/:version/files/*` |  | free | Delete an uploaded file (free) |
+| GET | `/:version/cachedContents` |  | free | List cached contents (free) |
+| GET | `/:version/cachedContents/*` |  | free | Get cached content details (free) |
 
 ### Modal
 > Serverless GPU compute for sandboxed code execution and AI/ML workloads.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/sandbox/create` | dynamic | Create a sandbox for code execution |
-| POST | `/sandbox/exec` | $0.0001 | Execute command in sandbox |
-| POST | `/sandbox/status` | $0.0001 | Get sandbox status |
-| POST | `/sandbox/terminate` | $0.0001 | Terminate a sandbox |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/sandbox/create` | session | dynamic | Create a sandbox for code execution |
+| POST | `/sandbox/exec` | session | $0.0001 | Execute command in sandbox |
+| POST | `/sandbox/status` | session | $0.0001 | Get sandbox status |
+| POST | `/sandbox/terminate` | session | $0.0001 | Terminate a sandbox |
 
 ### Object Storage
 > S3/R2-compatible object storage with dynamic per-size pricing.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| GET | `/:key` | dynamic | Download object ($0.001 base + $0.01/MB) |
-| PUT | `/:key` | dynamic | Upload object ($0.001 base + $0.01/MB, max 100MB) |
-| DELETE | `/:key` | $0.0001 | Delete object |
-| GET | `/` | $0.0001 | List objects |
-| POST | `/:key` | $0.0001 | Initiate/complete multipart upload |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| GET | `/:key` | session | dynamic | Download object ($0.001 base + $0.01/MB) |
+| PUT | `/:key` | session | dynamic | Upload object ($0.001 base + $0.01/MB, max 100MB) |
+| DELETE | `/:key` | charge | $0.0001 | Delete object |
+| GET | `/` | charge | $0.0001 | List objects |
+| POST | `/:key` | charge | $0.0001 | Initiate/complete multipart upload |
 
 ### OpenAI
 > Chat completions, embeddings, image generation, and audio with model-tier pricing.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/v1/responses` | dynamic | Responses API (Codex, GPT-4o, etc.) - price varies by model |
-| POST | `/v1/chat/completions` | dynamic | Chat completions (GPT-4o, GPT-4, o1, etc.) - price varies by model |
-| POST | `/v1/embeddings` | $0.0001 | Create embeddings |
-| POST | `/v1/images/generations` | $0.0500 | Generate images with DALL-E |
-| POST | `/v1/audio/transcriptions` | $0.0100 | Transcribe audio with Whisper |
-| POST | `/v1/audio/speech` | $0.0200 | Text-to-speech |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/v1/responses` | session | dynamic | Responses API (Codex, GPT-4o, etc.) - price varies by model |
+| POST | `/v1/chat/completions` | session | dynamic | Chat completions (GPT-4o, GPT-4, o1, etc.) - price varies by model |
+| POST | `/v1/embeddings` | charge | $0.0001 | Create embeddings |
+| POST | `/v1/images/generations` | charge | $0.0500 | Generate images with DALL-E |
+| POST | `/v1/audio/transcriptions` | charge | $0.0100 | Transcribe audio with Whisper |
+| POST | `/v1/audio/speech` | charge | $0.0200 | Text-to-speech |
 
 ### OpenRouter
 > Unified API for 100+ LLMs with live per-model pricing.
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/v1/chat/completions` | dynamic | Chat completions (GPT-4, Claude, Llama, etc.) - price varies by model |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/v1/chat/completions` | session | dynamic | Chat completions (GPT-4, Claude, Llama, etc.) - price varies by model |
 
 ### Tempo RPC
 > Tempo blockchain JSON-RPC access (mainnet and testnet).
 
-| Method | Path | Price | Description |
-|--------|------|-------|-------------|
-| POST | `/` | $0.0010 | JSON-RPC calls - $0.001 per call |
+| Method | Path | Intent | Price | Description |
+|--------|------|--------|-------|-------------|
+| POST | `/` | session | $0.0010 | JSON-RPC calls - $0.001 per call |
 
 ## Charge Services (71)
 
-One-time payment per request — each call is a separate on-chain transaction.
+One-time payment per request. All on **Tempo Mainnet (4217) USDC** unless noted.
 
 | Service | URL | Category | Description |
 |---------|-----|----------|-------------|
@@ -188,6 +201,8 @@ One-time payment per request — each call is a separate on-chain transaction.
 | **Wolfram|Alpha** | `https://wolframalpha.mpp.paywithlocus.com` | data | Computational knowledge engine — math, science, geography, history, nutrition, f... |
 
 ## Stripe Services (3)
+
+Fiat payment via **Stripe (USD)**. No crypto required.
 
 | Service | URL | Description |
 |---------|-----|-------------|
