@@ -42,6 +42,68 @@ const client = createClient({
   transport: http(process.env.MPPX_RPC_URL),
 })
 
+// ─── Logging ────────────────────────────────────────────────────────────────
+
+function ts(): string {
+  return new Date().toISOString()
+}
+
+function logRequest(req: Request, extra?: Record<string, unknown>): void {
+  const url = new URL(req.url)
+  const auth = req.headers.get('Authorization')
+  const hasPayment = auth?.toLowerCase().startsWith('payment ')
+  const log: Record<string, unknown> = {
+    ts: ts(),
+    method: req.method,
+    path: url.pathname + url.search,
+    hasAuth: !!auth,
+    hasPayment,
+  }
+  // Extract payer from credential if present
+  if (hasPayment && auth) {
+    try {
+      const encoded = auth.slice(8)
+      const json = JSON.parse(atob(encoded))
+      log.intent = json.challenge?.intent
+      log.action = json.payload?.action
+      log.source = json.source
+      log.channelId = json.payload?.channelId?.slice(0, 18) + '...'
+      if (json.payload?.cumulativeAmount) {
+        log.cumAmount = json.payload.cumulativeAmount
+      }
+    } catch {
+      log.credentialParseError = true
+    }
+  }
+  if (extra) Object.assign(log, extra)
+  console.log(`📥 ${JSON.stringify(log)}`)
+}
+
+function logResponse(
+  req: Request,
+  status: number,
+  startMs: number,
+  extra?: Record<string, unknown>,
+): void {
+  const url = new URL(req.url)
+  const elapsed = Date.now() - startMs
+  const log: Record<string, unknown> = {
+    ts: ts(),
+    method: req.method,
+    path: url.pathname,
+    status,
+    ms: elapsed,
+  }
+  if (extra) Object.assign(log, extra)
+  const emoji = status === 200 || status === 204 ? '✅' : status === 402 ? '💳' : '❌'
+  console.log(`${emoji} ${JSON.stringify(log)}`)
+}
+
+function logError(context: string, error: unknown): void {
+  const msg = error instanceof Error ? error.message : String(error)
+  console.error(`🔥 [${ts()}] ${context}: ${msg}`)
+}
+
 // ─── Payment Handler ────────────────────────────────────────────────────────
 
 // tempo() returns both charge and session methods when given an account
@@ -82,22 +144,39 @@ function randomChoice<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]!
 }
 
+// ─── Stats ──────────────────────────────────────────────────────────────────
+
+const stats = {
+  startedAt: new Date().toISOString(),
+  requests: 0,
+  charge402: 0,
+  charge200: 0,
+  session402: 0,
+  sessionOpen: 0,
+  sessionVoucher: 0,
+  sessionClose: 0,
+  errors: 0,
+}
+
 // ─── Request Handler ────────────────────────────────────────────────────────
 
 async function handler(request: Request): Promise<Response> {
+  const startMs = Date.now()
   const url = new URL(request.url)
+  stats.requests++
 
-  // Free endpoints
+  // Free endpoints (no logging for health to reduce noise)
   if (url.pathname === '/') {
     return Response.json({
       service: 'MPP Demo Server (mppx)',
-      version: '0.1.0',
+      version: '0.2.0',
       chain: 'Tempo Moderato Testnet (42431)',
       recipient: account.address,
       endpoints: {
         '/health': { mode: 'free' },
         '/joke': { mode: 'charge', price: '$0.01/request' },
         '/gallery': { mode: 'session', price: '$0.005/image' },
+        '/stats': { mode: 'free', description: 'Server statistics' },
       },
       protocol: 'https://paymentauth.org',
     })
@@ -107,39 +186,114 @@ async function handler(request: Request): Promise<Response> {
     return Response.json({ status: 'ok', recipient: account.address })
   }
 
+  if (url.pathname === '/stats') {
+    return Response.json({
+      ...stats,
+      uptime: `${((Date.now() - new Date(stats.startedAt).getTime()) / 1000).toFixed(0)}s`,
+    })
+  }
+
   // Charge endpoint: /joke ($0.01 per request)
   if (url.pathname === '/joke') {
-    const result = await mppx.charge({
-      amount: '0.01',
-      description: 'One programmer joke',
-    })(request)
+    logRequest(request)
+    try {
+      const result = await mppx.charge({
+        amount: '0.01',
+        description: 'One programmer joke',
+      })(request)
 
-    if (result.status === 402) return result.challenge
+      if (result.status === 402) {
+        stats.charge402++
+        logResponse(request, 402, startMs, { intent: 'charge' })
+        return result.challenge
+      }
 
-    return result.withReceipt(
-      Response.json({
-        joke: randomChoice(JOKES),
+      stats.charge200++
+      const joke = randomChoice(JOKES)
+      logResponse(request, 200, startMs, {
+        intent: 'charge',
         payer: result.credential.source,
-      }),
-    )
+      })
+      return result.withReceipt(
+        Response.json({ joke, payer: result.credential.source }),
+      )
+    } catch (e) {
+      stats.errors++
+      logError('/joke', e)
+      logResponse(request, 500, startMs, { error: String(e) })
+      return Response.json(
+        { error: 'Internal error', detail: (e as Error).message },
+        { status: 500 },
+      )
+    }
   }
 
   // Session endpoint: /gallery ($0.005 per image)
   if (url.pathname === '/gallery') {
-    const result = await mppx.session({
-      amount: '0.005',
-      unitType: 'image',
-    })(request)
+    logRequest(request)
+    try {
+      const result = await mppx.session({
+        amount: '0.005',
+        unitType: 'image',
+      })(request)
 
-    if (result.status === 402) return result.challenge
+      if (result.status === 402) {
+        stats.session402++
+        logResponse(request, 402, startMs, { intent: 'session' })
+        return result.challenge
+      }
 
-    return result.withReceipt(
-      Response.json({
-        image: randomChoice(GALLERY),
-      }),
-    )
+      // Determine action from credential payload for logging
+      let action = 'unknown'
+      try {
+        const payload = result.credential?.payload as Record<string, unknown> | undefined
+        action = (payload?.action as string) ?? 'unknown'
+      } catch {}
+      // Fallback: parse from Authorization header
+      if (action === 'unknown') {
+        try {
+          const auth = request.headers.get('Authorization') ?? ''
+          if (auth.toLowerCase().startsWith('payment ')) {
+            const json = JSON.parse(atob(auth.slice(8)))
+            action = json.payload?.action ?? 'unknown'
+          }
+        } catch {}
+      }
+      if (action === 'open') stats.sessionOpen++
+      else if (action === 'voucher') stats.sessionVoucher++
+      else if (action === 'close') stats.sessionClose++
+
+      const image = randomChoice(GALLERY)
+      const responseStatus = action === 'close' ? 204 : 200
+      logResponse(request, responseStatus, startMs, {
+        intent: 'session',
+        action,
+        image: action !== 'close' ? image.title : undefined,
+      })
+
+      return result.withReceipt(
+        action === 'close'
+          ? new Response(null, { status: 204 })
+          : Response.json({ image }),
+      )
+    } catch (e) {
+      stats.errors++
+      logError('/gallery', e)
+      const detail = (e as Error).message ?? String(e)
+      logResponse(request, 402, startMs, { error: detail })
+      return Response.json(
+        {
+          type: 'https://paymentauth.org/problems/verification-failed',
+          title: 'Verification Failed',
+          status: 402,
+          detail,
+        },
+        { status: 402 },
+      )
+    }
   }
 
+  logResponse(request, 404, startMs)
   return Response.json({ error: 'not_found' }, { status: 404 })
 }
 
@@ -157,7 +311,8 @@ try {
 
 console.log(`\n🚀 MPP Demo Server (mppx) listening on http://localhost:${PORT}`)
 console.log(`   GET /joke    → charge ($0.01)`)
-console.log(`   GET /gallery → session ($0.005/image)\n`)
+console.log(`   GET /gallery → session ($0.005/image)`)
+console.log(`   GET /stats   → server statistics\n`)
 
 Bun.serve({
   port: PORT,
