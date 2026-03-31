@@ -21,7 +21,7 @@ async def test_root():
         resp = await client.get("/")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["service"] == "MPP Demo Server"
+    assert data["service"] == "MPP Demo Server (Python)"
     assert "/joke" in data["endpoints"]
 
 
