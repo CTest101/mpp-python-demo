@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any
+
 
 import httpx
 
 from ..core.config import TEMPO_CHAIN_ID
-from ..core.escrow import EscrowClient, ESCROW_ADDRESS
+from ..core.escrow import EscrowClient
 from ..core.protocol import (
     PaymentChallenge,
     build_authorization_header,

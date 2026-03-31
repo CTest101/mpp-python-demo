@@ -122,7 +122,7 @@ Custom 402 protocol implementation. Charge via pympp SDK, session via `protocol.
 
 ```bash
 MPP_RECIPIENT=0x... MPP_SERVER_PRIVATE_KEY=0x... \
-  uv run uvicorn mpp_demo.server:app --port 5555
+  uv run uvicorn mpp_demo.server.app:app --port 5555
 ```
 
 ## Endpoints

@@ -10,11 +10,8 @@ Session 端点使用标准 HTTP 402 Payment Authentication Scheme:
 
 from __future__ import annotations
 
-import json
 import os
 import random
-import time
-from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -25,14 +22,13 @@ from mpp.methods.tempo import tempo, ChargeIntent, TESTNET_CHAIN_ID, PATH_USD
 from mpp.errors import PaymentError, VerificationError
 
 from ..core.config import CHARGE_AMOUNT, SESSION_AMOUNT, RECIPIENT
-from ..core.voucher import Voucher, ESCROW_CONTRACT
+from ..core.voucher import Voucher
 from ..core.escrow import EscrowClient, ESCROW_ADDRESS
 from ..core.protocol import (
-    PaymentChallenge,
     build_session_challenge,
     parse_credential_from_request,
     build_session_receipt,
-    _b64url_encode,
+    verify_challenge_hmac,
 )
 from .verifier import SessionVerifier
 
@@ -236,7 +232,6 @@ async def gallery_session(request: Request):
         })
 
     # Verify challenge HMAC
-    from ..core.protocol import verify_challenge_hmac
     if not verify_challenge_hmac(credential["challenge"], _secret_key):
         return JSONResponse(status_code=402, content={
             "type": "https://paymentauth.org/problems/invalid-challenge",

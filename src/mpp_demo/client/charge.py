@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-import random
-
-import httpx
 from mpp.client import Client
 from mpp.methods.tempo import ChargeIntent, TESTNET_CHAIN_ID
 
-from ..core.config import SERVER_HOST
-from ..signer import Signer, signer_from_env, SignerTempoMethod
+from ..signer import Signer, SignerTempoMethod
 
 
 def _make_method(signer: Signer) -> SignerTempoMethod:

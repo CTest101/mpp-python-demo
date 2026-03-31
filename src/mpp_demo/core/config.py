@@ -1,6 +1,6 @@
 """Shared configuration for Tempo and MPP protocol.
 
-基于 pympp 0.4.2 真实常量。
+基于 pympp 0.5.0 真实常量。
 """
 
 import os

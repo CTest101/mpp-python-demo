@@ -20,13 +20,13 @@ from typing import Any
 
 import attrs
 import httpx
-from eth_abi import encode, decode
+from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector
 from pytempo import Call, TempoTransaction
 from pytempo.models import Signature, as_address
 from pytempo.contracts.tip20 import TIP20
 
-from .config import TEMPO_CHAIN_ID, TEMPO_RPC, PATH_USD_ADDRESS
+from .config import TEMPO_RPC, PATH_USD_ADDRESS
 from ..signer import Signer
 
 # ─── Contract Addresses ─────────────────────────────────────────────────────
