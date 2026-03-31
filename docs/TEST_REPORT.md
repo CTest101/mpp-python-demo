@@ -1,8 +1,8 @@
 # MPP Python Demo — E2E 详细过程报告
 
-- **运行时间**：2026-03-27T02:19:00Z (E2E 1-2) / 2026-03-31T04:44:00Z (E2E 3)
+- **运行时间**：2026-03-27T02:19:00Z (E2E 1) / 2026-03-31T04:44:00Z (E2E 2)
 - **平台**：Ubuntu 24.04 LTS, Python 3.14.3
-- **pympp**: 0.5.0 | **pytempo**: 0.4.0 | **mppx**: 0.5.0 (E2E 3 JS Server)
+- **pympp**: 0.5.0 | **pytempo**: 0.4.0 | **mppx**: 0.5.0 (E2E 2 JS Server)
 - **链**：Tempo Moderato Testnet (chain ID 42431)
 - **Token**: pathUSD (`0x20c0000000000000000000000000000000000000`, decimals=6)
 - **Escrow 合约**: `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` (TempoStreamChannel)
@@ -209,71 +209,7 @@ Credential(
 - **实际转账**: 0.10 pathUSD from `0x76BFc4B2...` → `0xf39Fd6e5...`
 
 ---
-
-## E2E 2: Charge — 本地 Server /joke
-
-端到端耗时：**1826 ms**（首跳 3ms + 二跳 1823ms）
-
-### 2.1 首跳：获取 Challenge
-
-- **URL**: `http://localhost:8801/joke`
-- **响应状态**: `402`
-- **耗时**: 3 ms
-
-```
-WWW-Authenticate: Payment id="MxaJ3VOpdo2UjJ83bp5Ff0SiEu_49hg_JcYtRuuf2FM",
-  realm="localhost", method="tempo", intent="charge",
-  request="...", description="One programmer joke ($0.01)",
-  expires="..."
-```
-
-**Challenge request 解码**:
-```json
-{
-  "amount": "10000",
-  "currency": "0x20c0000000000000000000000000000000000000",
-  "methodDetails": { "chainId": 42431 },
-  "recipient": "0x5d8D22169d5759E7edDF32898138368D7dfd7d9f"
-}
-```
-
-- `amount`: 10000 = **$0.01 pathUSD**
-- **无 feePayer** → Client 自付 gas
-- `fee_token` 设为 pathUSD（用稳定币付 gas）
-
-### 2.2 签名差异（vs E2E 1）
-
-| 维度 | E2E 1 (mpp.dev) | E2E 2 (local) |
-|------|-----------------|---------------|
-| feePayer | `true` (服务端赞助 gas) | `false` (Client 自付) |
-| nonce_key | `2^256 - 1` (expiring) | `0` (normal sequential) |
-| nonce | `0` (expiring) | 链上实际 nonce |
-| fee_token | `None` (server 设定) | pathUSD |
-| 输出格式 | fee payer envelope (0x78) | signed tx (0x76) |
-| Server 验证 | fee payer co-sign + broadcast | 直接 `eth_sendRawTransaction` |
-
-### 2.3 结算结果
-
-```
-Status: 200 (1823ms)
-Joke: Debugging: removing bugs. Programming: adding them.
-Payer: did:pkh:eip155:42431:0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D
-```
-
-**Receipt**:
-```json
-{
-  "method": "tempo",
-  "reference": "0xe4a161f24211960c8ee8a2705343e0ba78907fcc88ad992f34e35e042f0ac615",
-  "status": "success",
-  "timestamp": "2026-03-27T02:21:51.216036Z"
-}
-```
-
-**Explorer**: <https://explore.testnet.tempo.xyz/tx/0xe4a161f24211960c8ee8a2705343e0ba78907fcc88ad992f34e35e042f0ac615>
-
----
-## E2E 3: Session HTTP — 真实 402 协议流程 (Python Client ↔ mppx JS Server)
+## E2E 2: Session HTTP — 真实 402 协议流程 (Python Client ↔ mppx JS Server)
 
 - **运行时间**: 2026-03-31T04:44:00Z
 - **Server**: mppx 0.5.0 (TypeScript, Bun 1.3.11) — `server-js/`
@@ -285,7 +221,7 @@ Payer: did:pkh:eip155:42431:0x76BFc4B290823a08c6402fBC444A8E99B57d8a3D
 链上交易：**2 笔**（server broadcast open + server settle close）
 Off-chain 验证：**2 次**（voucher ecrecover, ~5ms each）
 
-### 3.1 时序图
+### 2.1 时序图
 
 ```mermaid
 sequenceDiagram
@@ -321,14 +257,14 @@ sequenceDiagram
     S-->>C: 204 + Payment-Receipt {txHash}
 ```
 
-### 3.2 测试账户
+### 2.2 测试账户
 
 | 角色 | Address | 来源 |
 |------|---------|------|
 | Client (Payer) | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | Hardhat 默认 key, faucet 充值 |
 | Server (Payee) | `0x75Dc3bA620Fc55F7aEBE67a88d729dAcA46c8935` | mppx server 启动时生成, faucet 充值 |
 
-### 3.3 Step 1: 初始请求 → 402
+### 2.3 Step 1: 初始请求 → 402
 
 - **URL**: `GET http://localhost:5555/gallery`
 - **响应状态**: `402 Payment Required`
@@ -388,7 +324,7 @@ Payment id="uT8ioaQIIXYtJ-U8evqgbkclA-RRUfVVjKSAswI5VIQ",
 | HMAC 验证 | 无 | 有（无状态 challenge ID） |
 | 标准化 | 自定义 REST | IETF Payment Authentication Scheme |
 
-### 3.4 Step 2: 签名 approve+open 交易（不广播）
+### 2.4 Step 2: 签名 approve+open 交易（不广播）
 
 Python client 构造 Tempo Transaction (type 0x76)，**签名但不广播** — server 负责广播。
 
@@ -417,7 +353,7 @@ Call 2: escrow.open(payee, token, deposit, salt, authorizedSigner)
 - **Raw TX**: 816 chars, prefix `0x76f90193...`
 - **签名耗时**: 262ms（含 RPC 获取 nonce/gas）
 
-### 3.5 Step 3: 构造 Open Credential
+### 2.5 Step 3: 构造 Open Credential
 
 ```python
 credential = {
@@ -450,7 +386,7 @@ digest = 0x11dd673de1a6ef81520bc99bbf784cc7...
 signature = 0x43a10d5e1ec9c5ead9...4491ae1b
 ```
 
-### 3.6 Step 4: Server 处理 Open Credential
+### 2.6 Step 4: Server 处理 Open Credential
 
 mppx server (`broadcastOpenTransaction`) 执行：
 
@@ -486,7 +422,7 @@ mppx server (`broadcastOpenTransaction`) 执行：
 }
 ```
 
-### 3.7 Step 5: Off-chain Voucher 请求
+### 2.7 Step 5: Off-chain Voucher 请求
 
 Channel 已建立后，后续请求只需 signed voucher — **零链上调用**。
 
@@ -521,7 +457,7 @@ Channel 已建立后，后续请求只需 signed voucher — **零链上调用**
 4. `cumulativeAmount <= channel.deposit` → 未超限 ✅
 5. 更新 `acceptedCumulative`, 返回 receipt
 
-### 3.8 Step 6: Close Channel
+### 2.8 Step 6: Close Channel
 
 Python client 发送 `action: "close"` credential，mppx server 链上结算。
 
@@ -564,7 +500,7 @@ Python client 发送 `action: "close"` credential，mppx server 链上结算。
 }
 ```
 
-### 3.9 结算汇总
+### 2.9 结算汇总
 
 | 项目 | 值 |
 |------|------|
@@ -578,43 +514,6 @@ Python client 发送 `action: "close"` credential，mppx server 链上结算。
 | Settle TX | <https://explore.testnet.tempo.xyz/tx/0xf546e9ec5d770c36cdea65254b644d86e8448a5c5aa4c6e0e8d31712c5b95671> |
 
 
-## 性能对比
-
-| 维度 | Charge (E2E 1/2) | Session HTTP 402 (E2E 3) |
-|------|-------------------|--------------------------|
-| 单次请求延迟 | ~1700-1800 ms | **5 ms** (voucher) |
-| 首次请求延迟 | ~1800 ms | 954 ms (server broadcast) |
-| 链上交易 | 每次 1 笔 | 2 笔 (open + close) |
-| 3 requests 总耗时 | ~5.4s (3 × 1.8s) | **10ms** (2 × 5ms + open) |
-| 含 open/close 总耗时 | — | ~1.3s |
-| 验证方式 | 链上 receipt + Transfer log | ecrecover + HMAC (CPU-bound) |
-| Gas per request | ~270K each | **0** (仅 open/close) |
-| Tx 广播方 | Client | **Server** |
-| 标准化 | IETF Payment Auth | IETF Payment Auth |
-| 适用场景 | 单次购买 | **高频 API (production)** |
-
-### Benchmark (100 vouchers)
-```
-Sign:   2.5 ms/voucher
-Verify: 3.7 ms/voucher
-Total:  6.2 ms/round-trip
-```
-
----
-
-## 安全属性
-
-| 属性 | Charge | Session (HTTP 402) |
-|------|--------|---------------------|
-| 防重放 | challenge HMAC + nonce | 累积金额递增 + challenge HMAC |
-| 身份验证 | 链上 from 地址 | ecrecover = payer (off-chain) + contract ecrecover (on-chain close) |
-| 金额上限 | 单次 challenge 金额 | escrow deposit (链上锁定) |
-| 时间限制 | challenge expires 5min | channel 生命周期 + 15min close grace period |
-| 签名绑定 | EIP-712 (Tempo tx hash) | EIP-712 (escrow domainSeparator + VOUCHER_TYPEHASH) |
-| 链上结算 | 每次请求 | close 时批量 1 笔 |
-| 退款保障 | — | escrow 合约自动退 refund |
-| 密钥隔离 | `Signer.sign_hash()` | 同一 `Signer.sign_hash()` |
-| Challenge 完整性 | HMAC-SHA256 | HMAC-SHA256 (402 模式) |
 
 ---
 
