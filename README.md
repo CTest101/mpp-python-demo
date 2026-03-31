@@ -1,24 +1,25 @@
 # MPP Python Demo
 
-Machine Payments Protocol (MPP) demo — Python implementation with charge (on-chain) + session (off-chain voucher) + abstract signer.
+Machine Payments Protocol (MPP) demo — Python client + server with charge (on-chain) + session (HTTP 402 payment channel) + abstract signer.
+
+Both Python and TypeScript (mppx) servers are included.
 
 ## Architecture
 
 ```
 ┌─────────────────┐                      ┌─────────────────┐
-│   MPP Client     │                      │   MPP Server     │
-│                  │                      │   (FastAPI)      │
-│  ┌────────────┐ │    Charge (on-chain)  │                  │
-│  │  Signer    │←┼── sign_hash() ───────→│  Mpp.charge()    │
-│  │  (ABC)     │ │    GET /joke          │  → 402 challenge │
-│  └─────┬──────┘ │    → pay on Tempo     │  → verify tx     │
-│        │        │    → 200 + receipt    │  → 200 + receipt │
-│  ┌─────┴──────┐ │                      │                  │
-│  │ LocalSigner│ │    Session (off-chain)│                  │
-│  │ KmsSigner  │ │    POST /session/open │  SessionVerifier │
-│  │ MpcSigner  │ │    POST /session/xxx  │  → ecrecover     │
-│  └────────────┘ │    → EIP-712 voucher  │  → zero RPC      │
-│                  │    POST /session/close│  → batch settle  │
+│   Python Client  │                      │   Server         │
+│                  │    Charge (on-chain)  │   (Python/JS)    │
+│  ┌────────────┐ │    GET /joke          │                  │
+│  │  Signer    │←┼── sign_hash() ───────→│  402 challenge   │
+│  │  (ABC)     │ │    → pay on Tempo     │  → verify tx     │
+│  └─────┬──────┘ │    → 200 + receipt    │  → 200 + receipt │
+│        │        │                      │                  │
+│  ┌─────┴──────┐ │    Session (402)      │                  │
+│  │ LocalSigner│ │    GET /gallery → 402 │  HMAC challenge  │
+│  │ KmsSigner  │ │    open: sign tx ────→│  broadcast tx    │
+│  │ MpcSigner  │ │    voucher: EIP-712──→│  ecrecover (~5ms)│
+│  └────────────┘ │    close: ──────────→│  on-chain settle │
 └─────────────────┘                      └─────────────────┘
                            │
               Tempo Moderato Testnet (chain 42431)
@@ -27,16 +28,109 @@ Machine Payments Protocol (MPP) demo — Python implementation with charge (on-c
 ## Two Payment Modes
 
 ### Charge (On-chain)
-Each request = one on-chain transaction. Server verifies by checking Tempo Testnet.
-- **Latency**: ~2-4s (block confirmation)
-- **Cost**: Gas fee per request
-- **Use case**: One-time purchases, high-value transactions
+Each request = one on-chain transaction via pympp SDK.
+- **Latency**: ~2s (block confirmation)
+- **Use case**: One-time purchases
 
-### Session (Off-chain Voucher)
-Client opens a payment channel, signs EIP-712 cumulative vouchers. Server verifies with `ecrecover` — **zero chain calls**.
-- **Latency**: ~microseconds (CPU-bound `ecrecover`)
-- **Cost**: Near zero (batch settle on close)
-- **Use case**: High-frequency API billing, per-token LLM metering
+### Session (HTTP 402 Protocol)
+Client opens an escrow payment channel, sends EIP-712 cumulative vouchers. Server verifies via `ecrecover` — **zero chain calls** per request.
+- **Latency**: ~5ms (CPU-bound ecrecover)
+- **Protocol**: IETF Payment Authentication Scheme (`WWW-Authenticate: Payment`)
+- **Use case**: High-frequency API calls, per-token LLM metering
+
+```
+GET /gallery → 402 + WWW-Authenticate: Payment intent="session"
+GET /gallery + Authorization: Payment {action:"open", tx, voucher} → 200
+GET /gallery + Authorization: Payment {action:"voucher", cumAmount} → 200 (~5ms)
+GET /gallery + Authorization: Payment {action:"close"} → server settles on-chain
+```
+
+## Project Structure
+
+```
+mpp-python-demo/
+├── src/mpp_demo/
+│   ├── server.py              # Python server: charge (pympp) + session (402)
+│   ├── client.py              # CLI: charge / gallery / session
+│   ├── protocol.py            # Payment Auth: challenge/credential/receipt
+│   ├── session.py             # EIP-712 voucher sign/verify
+│   ├── session_http.py        # SessionHttpClient (402 protocol)
+│   ├── onchain.py             # Tempo escrow contract client
+│   ├── config.py              # Tempo Moderato Testnet config
+│   └── signer/                # Abstract signer (LocalSigner, etc.)
+├── server-js/                 # TypeScript server (mppx SDK + Bun)
+│   └── src/index.ts
+├── tests/                     # 31 tests
+│   ├── test_signer.py
+│   ├── test_server.py
+│   ├── test_session.py
+│   └── test_benchmark.py
+└── docs/
+    └── TEST_REPORT.md         # E2E detailed report with on-chain tx links
+```
+
+## Quick Start
+
+### 1. Install
+
+```bash
+cd ~/codes/mpp-python-demo
+uv sync --all-extras
+```
+
+### 2. Fund account
+
+```bash
+curl -X POST https://rpc.moderato.tempo.xyz \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tempo_fundAddress","params":["YOUR_ADDRESS"],"id":1}'
+```
+
+### 3. Start JS server (recommended)
+
+```bash
+cd server-js && bun install && bun run dev
+```
+
+### 4. Run client
+
+```bash
+export MPP_PRIVATE_KEY=0xYourPrivateKey
+
+# Charge: buy a joke (on-chain, ~2s)
+uv run python -m mpp_demo.client charge --server http://localhost:5555
+
+# Session: buy images (402 protocol, ~5ms/image after open)
+uv run python -m mpp_demo.client session --count 5 --server http://localhost:5555
+```
+
+## Servers
+
+### TypeScript Server (mppx SDK)
+
+Uses the official [mppx](https://github.com/wevm/mppx) SDK. Both charge and session modes via `tempo()`.
+
+```bash
+cd server-js && bun run dev  # port 5555
+```
+
+### Python Server (FastAPI)
+
+Custom 402 protocol implementation. Charge via pympp SDK, session via `protocol.py`.
+
+```bash
+MPP_RECIPIENT=0x... MPP_SERVER_PRIVATE_KEY=0x... \
+  uv run uvicorn mpp_demo.server:app --port 5555
+```
+
+## Endpoints
+
+| Endpoint | Mode | Price |
+|----------|------|-------|
+| `GET /health` | free | — |
+| `GET /joke` | charge | $0.01/request |
+| `GET /gallery/charge` | charge | $0.005/image |
+| `GET /gallery` | session (402) | $0.005/image |
 
 ## Signer Abstraction
 
@@ -47,144 +141,19 @@ Signer (ABC)
 │
 ├── LocalSigner        ← private key (dev/testing)
 ├── KmsSigner          ← AWS/GCP KMS (TODO)
-├── MpcSigner          ← Cobo TSS / Fireblocks (TODO)
-└── PasskeySigner      ← WebAuthn (TODO)
+└── MpcSigner          ← Cobo TSS / Fireblocks (TODO)
 ```
-
-The `Signer` base class provides a single `sign_hash()` method. `SignerTempoMethod` overrides pympp's internal signing flow:
-
-```
-pympp default:   tx.sign(private_key)         ← SDK controls signing
-our approach:    tx.get_signing_hash() → 32 bytes
-                 signer.sign_hash(hash) → 65 bytes  ← WE control signing
-                 attrs.evolve(tx, signature=sig)
-```
-
-## Project Structure
-
-```
-mpp-python-demo/
-├── pyproject.toml
-├── README.md
-├── src/mpp_demo/
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── config.py                  # Tempo Moderato Testnet config
-│   ├── server.py                  # FastAPI: charge + session endpoints
-│   ├── client.py                  # CLI: charge / gallery / session
-│   ├── session.py                 # Session: EIP-712 voucher sign/verify
-│   └── signer/
-│       ├── __init__.py
-│       ├── base.py                # Signer ABC
-│       ├── local.py               # LocalSigner (private key)
-│       ├── env.py                 # signer_from_env() factory
-│       └── tempo_adapter.py       # SignerTempoMethod (override pympp signing)
-└── tests/
-    ├── test_signer.py             # 9 tests
-    ├── test_server.py             # 3 tests
-    └── test_session.py            # 6 tests
-```
-
-## Quick Start
-
-```bash
-# 1. Install
-cd ~/codes/mpp-python-demo
-uv sync --all-extras
-
-# 2. Get testnet tokens (via RPC faucet)
-curl -X POST https://rpc.moderato.tempo.xyz \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tempo_fundAddress","params":["YOUR_ADDRESS"],"id":1}'
-
-# 3. Start server
-export MPP_RECIPIENT=0xYourAddress
-export MPP_SECRET_KEY=your-secret-key
-uv run uvicorn mpp_demo.server:app --port 8000
-
-# 4. Run client
-export MPP_PRIVATE_KEY=0xYourPrivateKey
-
-# Charge: buy a joke (on-chain, ~3s)
-uv run python -m mpp_demo.client charge
-
-# Session: buy 5 images (off-chain voucher, ~instant)
-uv run python -m mpp_demo.client session --count 5
-
-# Gallery: buy images (on-chain charge per image)
-uv run python -m mpp_demo.client gallery --count 3
-```
-
-## Endpoints
-
-| Endpoint | Mode | Price | Description |
-|----------|------|-------|-------------|
-| `GET /joke` | charge | $0.01 | Programmer joke (on-chain) |
-| `GET /gallery/charge` | charge | $0.005 | Random image (on-chain) |
-| `POST /session/open` | session | — | Open payment channel |
-| `POST /session/gallery` | session | $0.005 | Image via voucher (off-chain) |
-| `POST /session/close` | session | — | Settle & refund |
-
-## E2E Test Results
-
-### Charge (on-chain, Signer-controlled signing)
-```
-🔑 Signer: <LocalSigner 0x76BFc4B2...>
-🔐 Signing via: LocalSigner (NOT pympp auto-sign)
-💰 Charge mode — buying a joke (on-chain)...
-  HTTP 200
-🎭 Debugging: removing bugs. Programming: adding them.
-💳 Payer: did:pkh:eip155:42431:0x76BFc4B2...
-```
-
-### Session (off-chain voucher, zero chain calls)
-```
-⚡ Session mode — buying 5 images (off-chain voucher)...
-  📂 Opening session channel: 0xf7c99a238fe143f1...
-  ✅ Channel opened: deposit $1.00
-  [1] Forest Path | delta: $0.0050 | spent: $0.0050 | remaining: $0.9950
-  [2] Ocean Breeze | delta: $0.0050 | spent: $0.0100 | remaining: $0.9900
-  [3] Mountain Dawn | delta: $0.0050 | spent: $0.0150 | remaining: $0.9850
-  [4] Mountain Dawn | delta: $0.0050 | spent: $0.0200 | remaining: $0.9800
-  [5] City Lights | delta: $0.0050 | spent: $0.0250 | remaining: $0.9750
-  ✅ Session closed: spent $0.0250, refund $0.9750
-📊 Got 5 images (zero on-chain tx!)
-```
-
-## Comparison: MPP vs x402
-
-| Aspect | MPP (this demo) | x402 (x402-local-lab) |
-|--------|-----------------|----------------------|
-| **Signer** | `Signer` ABC → `sign_hash(bytes32)` | `X402Signer` → `signHash(hex)` |
-| **Payment modes** | Charge (on-chain) + Session (off-chain) | Charge only (every request on-chain) |
-| **Per-request cost** | Session: ~$0 / Charge: gas | Every request: gas |
-| **Verification latency** | Session: µs / Charge: ~3s | ~block time per request |
-| **Protocol** | HTTP 402 + IETF spec | HTTP 402 (no spec) |
-| **Server SDK** | `pympp` + `Mpp.create()` | `@x402/server` middleware |
-| **Chain** | Tempo Moderato (42431) | Base Sepolia / Solana Devnet |
-| **Session support** | ✅ EIP-712 vouchers | ❌ |
-| **MCP transport** | ✅ (spec defined) | ❌ |
-| **IETF standardization** | ✅ paymentauth.org | ❌ |
-| **Multi-method** | ✅ Tempo + Stripe + Lightning | ❌ Blockchain only |
-
-### Key Architectural Difference
-x402's signer abstraction is thin (just `signHash` + `signTypedData`), but every payment requires a full on-chain transaction.
-
-MPP's session mode eliminates on-chain calls during service consumption — the client signs cumulative EIP-712 vouchers, the server verifies with `ecrecover` in microseconds, and settlement happens in batches on channel close.
 
 ## Tech Stack
 
-- **Python** 3.12+
-- **Server**: FastAPI + pympp 0.4.2 (official SDK)
-- **Client**: pympp Client + SignerTempoMethod
-- **Session**: EIP-712 typed data + eth-account
+- **Python** 3.12+ / **Bun** 1.3+
+- **pympp** 0.5.0 / **mppx** 0.5.0
+- **pytempo** 0.4.0 / **viem** 2.47
 - **Chain**: Tempo Moderato Testnet (42431)
-- **Token**: pathUSD (`0x20c0...`)
-- **Package manager**: uv
+- **Token**: pathUSD (6 decimals)
 
 ## Tests
 
 ```bash
-uv run pytest tests/ -v
-# 18 passed ✅
+uv run pytest tests/ -v  # 31 passed
 ```

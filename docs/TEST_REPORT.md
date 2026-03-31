@@ -316,13 +316,10 @@ Payment id="uT8ioaQIIXYtJ-U8evqgbkclA-RRUfVVjKSAswI5VIQ",
 | `unitType` | `image` | 计费单位标识 |
 | `expires` | `2026-03-31T04:49:13.173Z` | Challenge 有效期 5 分钟 |
 
-**vs E2E 3 (REST session) 的差异**:
-| 维度 | E2E 3 (REST session) | E2E 3 (HTTP 402 session) |
-|------|---------------------|--------------------------|
-| 发现方式 | `GET /session-onchain/info` | `402 + WWW-Authenticate` |
-| 参数来源 | 手动拼接 | Challenge 自动携带 |
-| HMAC 验证 | 无 | 有（无状态 challenge ID） |
-| 标准化 | 自定义 REST | IETF Payment Authentication Scheme |
+**协议特点**:
+- 标准 IETF Payment Authentication Scheme（非自定义 REST）
+- Challenge 自动携带 escrow/recipient/amount（无需手动拼接）
+- HMAC-SHA256 无状态验证（server 不存储 challenge）
 
 ### 2.4 Step 2: 签名 approve+open 交易（不广播）
 
@@ -527,14 +524,14 @@ Python client 发送 `action: "close"` credential，mppx server 链上结算。
 | FastAPI | 0.135.2 |
 | eth-account | 0.13+ |
 | eth-abi | 5.0+ |
-| mppx | 0.5.0 (TypeScript SDK, E2E 3) |
-| Bun | 1.3.11 (E2E 3 server runtime) |
-| viem | 2.47.6 (E2E 3 server) |
+| mppx | 0.5.0 (TypeScript SDK, JS server) |
+| Bun | 1.3.11 (JS server runtime) |
+| viem | 2.47.6 (JS server) |
 | Chain | Tempo Moderato Testnet (42431) |
 | Token | pathUSD (`0x20c0...`, 6 decimals) |
 | Escrow | `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` |
 | RPC | `https://rpc.moderato.tempo.xyz` |
 | Official server | mpp.dev (Vercel) |
 | Python server | FastAPI + uvicorn (127.0.0.1:8801) |
-| JS server | mppx + Bun (127.0.0.1:5555, E2E 3) |
+| JS server | mppx + Bun (127.0.0.1:5555) |
 | Unit tests | 56 passed (1.82s) |
