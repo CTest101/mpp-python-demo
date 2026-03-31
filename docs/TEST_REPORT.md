@@ -1,8 +1,8 @@
 # MPP Python Demo — E2E 详细过程报告
 
-- **运行时间**：2026-03-27T02:19:00Z
+- **运行时间**：2026-03-27T02:19:00Z (E2E 1-3) / 2026-03-31T04:44:00Z (E2E 4)
 - **平台**：Ubuntu 24.04 LTS, Python 3.14.3
-- **pympp**: 0.4.2 | **pytempo**: 0.4.0
+- **pympp**: 0.4.2 (E2E 1-3) / 0.5.0 (E2E 4) | **pytempo**: 0.4.0 | **mppx**: 0.5.0 (E2E 4)
 - **链**：Tempo Moderato Testnet (chain ID 42431)
 - **Token**: pathUSD (`0x20c0000000000000000000000000000000000000`, decimals=6)
 - **Escrow 合约**: `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` (TempoStreamChannel)
@@ -464,15 +464,19 @@ escrow.close(channelId, 15000, signature)
 
 ## 性能对比
 
-| 维度 | Charge (E2E 1/2) | Session On-chain (E2E 3) |
-|------|-------------------|--------------------------|
-| 单次请求延迟 | ~1700-1800 ms | **5-6 ms** (voucher) |
-| 链上交易 | 每次 1 笔 | 2 笔 (open + close) |
-| 3 requests 总耗时 | ~5.4s (3 × 1.8s) | **16ms** (3 × ~5ms) |
-| 含 open/close 总耗时 | — | ~8.5s |
-| 验证方式 | 链上 receipt + Transfer log | ecrecover (CPU-bound) |
-| Gas per request | ~270K each | **0** (仅 open/close) |
-| 适用场景 | 单次购买 | 高频 API / per-token LLM |
+| 维度 | Charge (E2E 1/2) | Session REST (E2E 3) | Session HTTP 402 (E2E 4) |
+|------|-------------------|---------------------|--------------------------|
+| 单次请求延迟 | ~1700-1800 ms | **5-6 ms** (voucher) | **5 ms** (voucher) |
+| 首次请求延迟 | ~1800 ms | 2869 ms (client broadcast) | 954 ms (server broadcast) |
+| 链上交易 | 每次 1 笔 | 2 笔 (open + close) | 2 笔 (open + close) |
+| 3 requests 总耗时 | ~5.4s (3 × 1.8s) | **16ms** (3 × ~5ms) | **10ms** (2 × 5ms + open) |
+| 含 open/close 总耗时 | — | ~8.5s | ~1.3s |
+| 验证方式 | 链上 receipt + Transfer log | ecrecover (CPU-bound) | ecrecover + HMAC (CPU-bound) |
+| Gas per request | ~270K each | **0** (仅 open/close) | **0** (仅 open/close) |
+| Tx 广播方 | Client | Client | **Server** |
+| 标准化 | IETF Payment Auth | 自定义 REST | IETF Payment Auth |
+| 跨语言兼容 | pympp/mppx | 否 | **是 (mppx 标准)** |
+| 适用场景 | 单次购买 | 高频 API (demo) | **高频 API (production)** |
 
 ### Benchmark (100 vouchers)
 ```
@@ -483,11 +487,335 @@ Total:  6.2 ms/round-trip
 
 ---
 
+## E2E 4: Session HTTP — 真实 402 协议流程 (Python Client ↔ mppx JS Server)
+
+- **运行时间**: 2026-03-31T04:44:00Z
+- **Server**: mppx 0.5.0 (TypeScript, Bun 1.3.11) — `server-js/`
+- **Client**: Python 3.14.3 + `SessionHttpClient`
+- **pympp**: 0.5.0 | **pytempo**: 0.4.0
+- **feePayer**: `false`（Client 自付 gas）
+
+端到端耗时：**~1.3s**（402 7ms + open sign 262ms + open broadcast 954ms + 2 vouchers 10ms + close 301ms）
+链上交易：**2 笔**（server broadcast open + server settle close）
+Off-chain 验证：**2 次**（voucher ecrecover, ~5ms each）
+
+### 4.1 时序图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Python Client (0xf39F...)
+    participant S as mppx Server (0x75Dc...)
+    participant E as Escrow (0xe1c4...)
+    participant T as Tempo Moderato (42431)
+
+    C->>S: GET /gallery (无 auth)
+    S-->>C: 402 + WWW-Authenticate: Payment intent="session"
+
+    Note over C: 解析 challenge<br/>签名 approve+open tx (不广播)<br/>签名首张 voucher
+
+    C->>S: GET /gallery + Authorization: Payment {action: "open", tx, voucher}
+    Note over S: 验证 challenge HMAC<br/>解码 tx → 验证 open calldata<br/>计算 channelId → 验证匹配<br/>广播 tx 到 Tempo
+    S->>T: eth_sendRawTransactionSync(signed_tx)
+    T->>E: approve + open → emit ChannelOpened
+    T-->>S: receipt (tx confirmed)
+    Note over S: ecrecover voucher → 验证 payer<br/>记录 channel state
+    S-->>C: 200 + Payment-Receipt {channelId, acceptedCumulative, txHash}
+
+    loop 后续请求 (off-chain voucher)
+        C->>S: GET /gallery + Authorization: Payment {action: "voucher", cumAmount, sig}
+        Note over S: ecrecover → cumulative 递增 → ✅
+        S-->>C: 200 + Payment-Receipt (~5ms)
+    end
+
+    C->>S: GET /gallery + Authorization: Payment {action: "close", cumAmount, sig}
+    S->>T: escrow.close(channelId, cumAmount, sig)
+    T->>E: close → transfer to payee + refund to payer
+    T-->>S: receipt
+    S-->>C: 204 + Payment-Receipt {txHash}
+```
+
+### 4.2 测试账户
+
+| 角色 | Address | 来源 |
+|------|---------|------|
+| Client (Payer) | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` | Hardhat 默认 key, faucet 充值 |
+| Server (Payee) | `0x75Dc3bA620Fc55F7aEBE67a88d729dAcA46c8935` | mppx server 启动时生成, faucet 充值 |
+
+### 4.3 Step 1: 初始请求 → 402
+
+- **URL**: `GET http://localhost:5555/gallery`
+- **响应状态**: `402 Payment Required`
+- **Content-Type**: `application/problem+json`
+- **耗时**: 7ms
+
+**WWW-Authenticate Header**:
+```http
+Payment id="uT8ioaQIIXYtJ-U8evqgbkclA-RRUfVVjKSAswI5VIQ",
+  realm="localhost",
+  method="tempo",
+  intent="session",
+  request="eyJhbW91bnQiOiI1MDAwIiwiY3VycmVuY3kiOiIweDIwYzAw...",
+  expires="2026-03-31T04:49:13.173Z"
+```
+
+**Challenge `request` 解码** (base64url → JSON):
+```json
+{
+  "amount": "5000",
+  "currency": "0x20c0000000000000000000000000000000000000",
+  "methodDetails": {
+    "chainId": 42431,
+    "escrowContract": "0xe1c4d3dce17bc111181ddf716f75bae49e61a336"
+  },
+  "recipient": "0x75Dc3bA620Fc55F7aEBE67a88d729dAcA46c8935",
+  "unitType": "image"
+}
+```
+
+**402 Body** (RFC 9457 Problem Details):
+```json
+{
+  "type": "https://paymentauth.org/problems/payment-required",
+  "title": "Payment Required",
+  "status": 402,
+  "detail": "Payment is required.",
+  "challengeId": "uT8ioaQIIXYtJ-U8evqgbkclA-RRUfVVjKSAswI5VIQ"
+}
+```
+
+**关键字段解释**:
+| 字段 | 值 | 含义 |
+|------|------|------|
+| `id` | `uT8ioaQII...` | HMAC-SHA256(secretKey, realm\|method\|intent\|request\|expires\|\|) — 无状态验证 |
+| `intent` | `session` | 付费通道模式（vs `charge` 单次付费） |
+| `amount` | `5000` | $0.005 pathUSD / 请求 |
+| `escrowContract` | `0xe1c4d3dc...` | TempoStreamChannel 合约 |
+| `unitType` | `image` | 计费单位标识 |
+| `expires` | `2026-03-31T04:49:13.173Z` | Challenge 有效期 5 分钟 |
+
+**vs E2E 3 (REST session) 的差异**:
+| 维度 | E2E 3 (REST session) | E2E 4 (HTTP 402 session) |
+|------|---------------------|--------------------------|
+| 发现方式 | `GET /session-onchain/info` | `402 + WWW-Authenticate` |
+| 参数来源 | 手动拼接 | Challenge 自动携带 |
+| HMAC 验证 | 无 | 有（无状态 challenge ID） |
+| 标准化 | 自定义 REST | IETF Payment Authentication Scheme |
+
+### 4.4 Step 2: 签名 approve+open 交易（不广播）
+
+Python client 构造 Tempo Transaction (type 0x76)，**签名但不广播** — server 负责广播。
+
+```python
+raw_tx, channel_id = await escrow.sign_approve_and_open(
+    payee="0x75Dc3bA620Fc55F7aEBE67a88d729dAcA46c8935",
+    deposit=1_000_000,
+    salt=bytes.fromhex("97d4e5c342dd16e8f1fa09b8c8e521c898bfc12bec1aa87382b0a2cafd3501f7"),
+)
+```
+
+**交易内容** (type 0x76, 2 calls batched):
+```
+Call 1: pathUSD.approve(escrow, 1000000)
+  to:       0x20c0000000000000000000000000000000000000 (pathUSD)
+  selector: 0x095ea7b3 = approve(address,uint256)
+
+Call 2: escrow.open(payee, token, deposit, salt, authorizedSigner)
+  to:       0xe1c4d3dce17bc111181ddf716f75bae49e61a336 (escrow)
+  selector: 0xc79ea485 = open(address,address,uint128,bytes32,address)
+```
+
+- **Salt**: `0x97d4e5c342dd16e8f1fa09b8c8e521c898bfc12bec1aa87382b0a2cafd3501f7`
+- **Channel ID**: `0x8f2ee76e9772344189c712b2a66c3202f03a5f71eb61d5fef8788eca48fd4895`
+  - = `keccak256(abi.encode(payer, payee, token, salt, authorizedSigner, escrowContract, chainId))`
+- **Raw TX**: 816 chars, prefix `0x76f90193...`
+- **签名耗时**: 262ms（含 RPC 获取 nonce/gas）
+
+### 4.5 Step 3: 构造 Open Credential
+
+```python
+credential = {
+    "challenge": {
+        "id": "uT8ioaQIIXYtJ-U8evqgbkclA-RRUfVVjKSAswI5VIQ",
+        "realm": "localhost",
+        "method": "tempo",
+        "intent": "session",
+        "request": "eyJhbW91bnQiOiI1MDAwIi...",   # 原样回显
+        "expires": "2026-03-31T04:49:13.173Z"      # 必须包含（参与 HMAC）
+    },
+    "payload": {
+        "action": "open",
+        "type": "transaction",
+        "channelId": "0x8f2ee76e9772344189c712b2a66c3202f03a5f71eb61d5fef8788eca48fd4895",
+        "transaction": "0x76f90193...",              # 签名原始 tx（非 tx hash！）
+        "signature": "0x43a10d5e1ec9c5ead9...1b",   # 首张 voucher 签名
+        "cumulativeAmount": "5000"                   # 首次金额
+    },
+    "source": "did:pkh:eip155:42431:0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+}
+```
+→ base64url 编码 → `Authorization: Payment <encoded>` (2288 chars)
+
+**首张 Voucher EIP-712 签名**:
+```
+digest = keccak256(0x1901 || DOMAIN_SEPARATOR || structHash)
+structHash = keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, 5000))
+digest = 0x11dd673de1a6ef81520bc99bbf784cc7...
+signature = 0x43a10d5e1ec9c5ead9...4491ae1b
+```
+
+### 4.6 Step 4: Server 处理 Open Credential
+
+mppx server (`broadcastOpenTransaction`) 执行：
+
+1. **HMAC 验证**: 重算 `HMAC-SHA256(secretKey, realm|method|intent|request|expires||)` → 比对 challenge.id ✅
+2. **解码 tx**: `Transaction.deserialize("0x76f90193...")` → 提取 calls
+3. **验证 open call**: 找到 `escrow.open()` calldata → 解码参数
+4. **验证 payee/token**: open 的 payee == challenge.recipient ✅, token == currency ✅
+5. **计算 channelId**: `Channel.computeId({payer, payee, token, salt, ...})` → 比对 credential.channelId ✅
+6. **广播 tx**: `eth_sendRawTransactionSync("0x76f90193...")` → 链上确认
+7. **验证 voucher**: ecrecover(digest, signature) == payer ✅
+8. **记录 channel state**: `{channelId, deposit, payer, acceptedCumulative: 5000}`
+
+**结果**:
+- **状态**: 200
+- **耗时**: 954ms（含链上 open 广播+确认）
+- **Open TX**: `0x69ace97bcd3d91ae30baf7f78ab0b3934cd63c03a3b757cc03e1577701543dc6`
+- **Explorer**: <https://explore.testnet.tempo.xyz/tx/0x69ace97bcd3d91ae30baf7f78ab0b3934cd63c03a3b757cc03e1577701543dc6>
+
+**Payment-Receipt 解码**:
+```json
+{
+  "method": "tempo",
+  "intent": "session",
+  "status": "success",
+  "timestamp": "2026-03-31T04:44:14.392Z",
+  "reference": "0x8f2ee76e977234418...",
+  "challengeId": "uT8ioaQIIXYtJ-U8evqgbkclA-RRUfVVjKSAswI5VIQ",
+  "channelId": "0x8f2ee76e977234418...",
+  "acceptedCumulative": "5000",
+  "spent": "0",
+  "units": 0,
+  "txHash": "0x69ace97bcd3d91ae30baf7f78ab0b3934cd63c03a3b757cc03e1577701543dc6"
+}
+```
+
+### 4.7 Step 5: Off-chain Voucher 请求
+
+Channel 已建立后，后续请求只需 signed voucher — **零链上调用**。
+
+**Voucher 详细数据**:
+
+| # | cumulativeAmount | Digest (前 32 hex) | Signature | 耗时 | 结果 |
+|---|-----------------|-------------------|-----------|------|------|
+| 1 | 5000 ($0.005) | `0x11dd673de1a6ef81520bc99bbf784cc7` | `0x43a10d5e...4491ae1b` | 954ms (含 open) | Forest Path |
+| 2 | 10000 ($0.010) | `0xa18168d571e9642e8de2b97b23af997d` | `0x408ab77a...a7d23a1b` | 5ms | Mountain Dawn |
+| 3 | 15000 ($0.015) | `0x527586cb81ea2b55029590ccda87acec` | `0xa45ac5d9...33c5821c` | 5ms | Ocean Breeze |
+
+**Voucher Credential 格式** (action: "voucher"):
+```json
+{
+    "challenge": { "id": "...", "realm": "localhost", ... },
+    "payload": {
+        "action": "voucher",
+        "channelId": "0x8f2ee76e977234418...",
+        "cumulativeAmount": "10000",
+        "signature": "0x408ab77accf1a227b8...a7d23a1b"
+    },
+    "source": "did:pkh:eip155:42431:0xf39F..."
+}
+```
+
+**Server 验证** (mppx `handleVoucher`, ~5ms):
+1. `channelStore.get(channelId)` → 存在 ✅
+2. `verifyVoucher(escrowContract, chainId, voucher, expectedSigner)`:
+   - `recoverTypedDataAddress({domain, types, message, signature})` → ecrecover
+   - `recovered == channel.payer` → ✅
+3. `cumulativeAmount > channel.acceptedCumulative` → 递增 ✅
+4. `cumulativeAmount <= channel.deposit` → 未超限 ✅
+5. 更新 `acceptedCumulative`, 返回 receipt
+
+### 4.8 Step 6: Close Channel
+
+Python client 发送 `action: "close"` credential，mppx server 链上结算。
+
+**Close Credential**:
+```json
+{
+    "payload": {
+        "action": "close",
+        "channelId": "0x8f2ee76e977234418...",
+        "cumulativeAmount": "15000",
+        "signature": "0xa45ac5d9f1028ca460...33c5821c"
+    }
+}
+```
+
+**Server 处理** (mppx `handleClose`):
+1. 验证 voucher 签名
+2. 调用 `closeOnChain(client, escrowContract, channelId, cumulativeAmount, signature)`
+3. Escrow 合约:
+   - ecrecover → payer ✅
+   - transfer 15000 to payee
+   - refund 985000 to payer
+   - emit `ChannelClosed`
+
+**结果**:
+- **状态**: 204
+- **耗时**: 301ms
+- **Settle TX**: `0xf546e9ec5d770c36cdea65254b644d86e8448a5c5aa4c6e0e8d31712c5b95671`
+- **Explorer**: <https://explore.testnet.tempo.xyz/tx/0xf546e9ec5d770c36cdea65254b644d86e8448a5c5aa4c6e0e8d31712c5b95671>
+
+**Close Receipt**:
+```json
+{
+  "method": "tempo",
+  "intent": "session",
+  "status": "success",
+  "channelId": "0x8f2ee76e977234418...",
+  "acceptedCumulative": "15000",
+  "txHash": "0xf546e9ec5d770c36cdea65254b644d86e8448a5c5aa4c6e0e8d31712c5b95671"
+}
+```
+
+### 4.9 结算汇总
+
+| 项目 | 值 |
+|------|------|
+| Channel ID | `0x8f2ee76e9772344189c712b2a66c3202f03a5f71eb61d5fef8788eca48fd4895` |
+| Deposit | 1,000,000 ($1.00) |
+| Total spent | 15,000 ($0.015) |
+| Refund | 985,000 ($0.985) |
+| Images purchased | 3 |
+| Price per image | 5,000 ($0.005) |
+| Open TX | <https://explore.testnet.tempo.xyz/tx/0x69ace97bcd3d91ae30baf7f78ab0b3934cd63c03a3b757cc03e1577701543dc6> |
+| Settle TX | <https://explore.testnet.tempo.xyz/tx/0xf546e9ec5d770c36cdea65254b644d86e8448a5c5aa4c6e0e8d31712c5b95671> |
+
+---
+
+## E2E 3 vs E2E 4 对比
+
+| 维度 | E2E 3 (REST Session) | E2E 4 (HTTP 402 Session) |
+|------|---------------------|--------------------------|
+| Server | Python (FastAPI) | TypeScript (mppx + Bun) |
+| 协议标准 | 自定义 REST API | IETF Payment Authentication Scheme |
+| 发现端点 | `GET /session-onchain/info` | 自动从 402 Challenge 获取 |
+| Open | Client 广播 + `POST /open` 注册 | Client 签名 → Server 广播 |
+| Voucher | `POST /gallery` + JSON body | `GET /gallery` + `Authorization` header |
+| Close | `POST /close` | `GET /gallery` + `action: "close"` credential |
+| Challenge HMAC | 无 | 有（无状态验证） |
+| Receipt | JSON response body | `Payment-Receipt` header (base64url) |
+| 首次请求延迟 | 2869ms (client broadcast) | 954ms (server broadcast) |
+| 后续请求延迟 | 5-6ms | 5ms |
+| 跨语言兼容 | 否（自定义格式） | 是（mppx 标准） |
+
+---
+
 ## 安全属性
 
-| 属性 | Charge | Session On-chain |
-|------|--------|-----------------|
-| 防重放 | challenge HMAC + nonce | 累积金额递增 + app nonce |
+| 属性 | Charge | Session (REST / HTTP 402) |
+|------|--------|--------------------------|
+| 防重放 | challenge HMAC + nonce | 累积金额递增 + challenge HMAC (402) |
 | 身份验证 | 链上 from 地址 | ecrecover = payer (off-chain) + contract ecrecover (on-chain close) |
 | 金额上限 | 单次 challenge 金额 | escrow deposit (链上锁定) |
 | 时间限制 | challenge expires 5min | channel 生命周期 + 15min close grace period |
@@ -495,6 +823,7 @@ Total:  6.2 ms/round-trip
 | 链上结算 | 每次请求 | close 时批量 1 笔 |
 | 退款保障 | — | escrow 合约自动退 refund |
 | 密钥隔离 | `Signer.sign_hash()` | 同一 `Signer.sign_hash()` |
+| Challenge 完整性 | HMAC-SHA256 | HMAC-SHA256 (402 模式) |
 
 ---
 
@@ -503,15 +832,19 @@ Total:  6.2 ms/round-trip
 | 组件 | 版本/配置 |
 |------|----------|
 | Python | 3.14.3 |
-| pympp | 0.4.2 |
+| pympp | 0.5.0 (E2E 1-3: 0.4.2) |
 | pytempo | 0.4.0 |
 | FastAPI | 0.135.2 |
 | eth-account | 0.13+ |
 | eth-abi | 5.0+ |
+| mppx | 0.5.0 (TypeScript SDK, E2E 4) |
+| Bun | 1.3.11 (E2E 4 server runtime) |
+| viem | 2.47.6 (E2E 4 server) |
 | Chain | Tempo Moderato Testnet (42431) |
 | Token | pathUSD (`0x20c0...`, 6 decimals) |
 | Escrow | `0xe1c4d3dce17bc111181ddf716f75bae49e61a336` |
 | RPC | `https://rpc.moderato.tempo.xyz` |
 | Official server | mpp.dev (Vercel) |
-| Local server | FastAPI + uvicorn (127.0.0.1) |
+| Python server | FastAPI + uvicorn (127.0.0.1:8801) |
+| JS server | mppx + Bun (127.0.0.1:5555, E2E 4) |
 | Unit tests | 56 passed (1.82s) |
