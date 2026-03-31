@@ -1,6 +1,6 @@
 # MPP Python Demo
 
-Machine Payments Protocol (MPP) demo — Python client + server with charge (on-chain) + session (HTTP 402 payment channel) + abstract signer.
+Machine Payments Protocol (MPP) demo — Python client + server implementing the [HTTP 402 Payment Authentication Scheme](https://paymentauth.org), with charge (per-request) and session (payment channel) intents.
 
 Both Python and TypeScript (mppx) servers are included.
 
@@ -8,42 +8,44 @@ Both Python and TypeScript (mppx) servers are included.
 
 ```
 ┌─────────────────┐                      ┌─────────────────┐
-│   Python Client  │                      │   Server         │
-│                  │    Charge (on-chain)  │   (Python/JS)    │
-│  ┌────────────┐ │    GET /joke          │                  │
-│  │  Signer    │←┼── sign_hash() ───────→│  402 challenge   │
-│  │  (ABC)     │ │    → pay on Tempo     │  → verify tx     │
-│  └─────┬──────┘ │    → 200 + receipt    │  → 200 + receipt │
-│        │        │                      │                  │
-│  ┌─────┴──────┐ │    Session (402)      │                  │
-│  │ LocalSigner│ │    GET /gallery → 402 │  HMAC challenge  │
-│  │ KmsSigner  │ │    open: sign tx ────→│  broadcast tx    │
-│  │ MpcSigner  │ │    voucher: EIP-712──→│  ecrecover (~5ms)│
-│  └────────────┘ │    close: ──────────→│  on-chain settle │
+│   Python Client  │     HTTP 402          │   Server         │
+│                  │   Payment Protocol    │   (Python/JS)    │
+│  ┌────────────┐ │                      │                  │
+│  │  Signer    │ │    GET /resource      │                  │
+│  │  (ABC)     │ │    ← 402 + Challenge  │  HMAC challenge  │
+│  └─────┬──────┘ │    → Authorization    │  → verify        │
+│        │        │    ← 200 + Receipt    │  → 200 + receipt │
+│  ┌─────┴──────┐ │                      │                  │
+│  │ LocalSigner│ │  Charge: 每次链上 tx   │                  │
+│  │ KmsSigner  │ │  Session: off-chain   │                  │
+│  │ MpcSigner  │ │    voucher (~5ms)     │                  │
+│  └────────────┘ │                      │                  │
 └─────────────────┘                      └─────────────────┘
                            │
               Tempo Moderato Testnet (chain 42431)
 ```
 
-## Two Payment Modes
+## Two Payment Intents
 
-### Charge (On-chain)
-Each request = one on-chain transaction via pympp SDK.
+Both use the same HTTP 402 protocol (`WWW-Authenticate: Payment` / `Authorization: Payment`), differing in `intent`:
+
+### Charge (`intent="charge"`)
+Each request = one on-chain transaction. Client signs a Tempo tx, server verifies on-chain.
+- **Flow**: `GET → 402 → sign tx → Authorization: Payment → 200`
 - **Latency**: ~2s (block confirmation)
-- **Use case**: One-time purchases
+- **Use case**: One-time purchases, low-frequency API
 
-### Session (HTTP 402 Protocol)
-Client opens an escrow payment channel, sends EIP-712 cumulative vouchers. Server verifies via `ecrecover` — **zero chain calls** per request.
-- **Latency**: ~5ms (CPU-bound ecrecover)
-- **Protocol**: IETF Payment Authentication Scheme (`WWW-Authenticate: Payment`)
+### Session (`intent="session"`)
+Client opens an escrow payment channel, then sends EIP-712 cumulative vouchers — **zero chain calls** per request.
+- **Flow**:
+  ```
+  GET /gallery → 402 + WWW-Authenticate: Payment intent="session"
+  GET /gallery + Authorization: Payment {action:"open", tx, voucher} → 200 (server broadcasts open tx)
+  GET /gallery + Authorization: Payment {action:"voucher", cumAmount} → 200 (~5ms, ecrecover only)
+  GET /gallery + Authorization: Payment {action:"close"} → server settles on-chain
+  ```
+- **Latency**: ~5ms per request (after channel open)
 - **Use case**: High-frequency API calls, per-token LLM metering
-
-```
-GET /gallery → 402 + WWW-Authenticate: Payment intent="session"
-GET /gallery + Authorization: Payment {action:"open", tx, voucher} → 200
-GET /gallery + Authorization: Payment {action:"voucher", cumAmount} → 200 (~5ms)
-GET /gallery + Authorization: Payment {action:"close"} → server settles on-chain
-```
 
 ## Project Structure
 
