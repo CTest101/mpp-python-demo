@@ -44,39 +44,26 @@ const client = createClient({
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 
-function ts(): string {
-  return new Date().toISOString()
-}
-
-function logRequest(req: Request, extra?: Record<string, unknown>): void {
+function logRequest(req: Request): void {
   const url = new URL(req.url)
   const auth = req.headers.get('Authorization')
-  const hasPayment = auth?.toLowerCase().startsWith('payment ')
-  const log: Record<string, unknown> = {
-    ts: ts(),
-    method: req.method,
-    path: url.pathname + url.search,
-    hasAuth: !!auth,
-    hasPayment,
-  }
-  // Extract payer from credential if present
-  if (hasPayment && auth) {
-    try {
-      const encoded = auth.slice(8)
-      const json = JSON.parse(atob(encoded))
-      log.intent = json.challenge?.intent
-      log.action = json.payload?.action
-      log.source = json.source
-      log.channelId = json.payload?.channelId?.slice(0, 18) + '...'
-      if (json.payload?.cumulativeAmount) {
-        log.cumAmount = json.payload.cumulativeAmount
-      }
-    } catch {
-      log.credentialParseError = true
-    }
-  }
-  if (extra) Object.assign(log, extra)
-  console.log(`📥 ${JSON.stringify(log)}`)
+  if (!auth?.toLowerCase().startsWith('payment ')) return
+
+  let action = '', source = '', channelId = '', cumAmount = ''
+  try {
+    const json = JSON.parse(atob(auth.slice(8)))
+    action = json.payload?.action ?? ''
+    source = json.source ?? ''
+    channelId = json.payload?.channelId ? json.payload.channelId.slice(0, 18) + '...' : ''
+    cumAmount = json.payload?.cumulativeAmount ?? ''
+  } catch {}
+
+  const parts = [`📥 ${req.method} ${url.pathname}`]
+  if (action) parts.push(`action=${action}`)
+  if (source) parts.push(`source=${source.length > 40 ? source.slice(0, 40) + '...' : source}`)
+  if (channelId) parts.push(`ch=${channelId}`)
+  if (cumAmount) parts.push(`cum=${cumAmount}`)
+  console.log(parts.join(' '))
 }
 
 function logResponse(
@@ -86,22 +73,22 @@ function logResponse(
   extra?: Record<string, unknown>,
 ): void {
   const url = new URL(req.url)
-  const elapsed = Date.now() - startMs
-  const log: Record<string, unknown> = {
-    ts: ts(),
-    method: req.method,
-    path: url.pathname,
-    status,
-    ms: elapsed,
-  }
-  if (extra) Object.assign(log, extra)
+  const ms = Date.now() - startMs
   const emoji = status === 200 || status === 204 ? '✅' : status === 402 ? '💳' : '❌'
-  console.log(`${emoji} ${JSON.stringify(log)}`)
+  const parts = [`${emoji} ${req.method} ${url.pathname} ${status} ${ms}ms`]
+  if (extra?.intent) parts.push(`intent=${extra.intent}`)
+  if (extra?.action) parts.push(`action=${extra.action}`)
+  if (extra?.image) parts.push(`image=${extra.image}`)
+  if (extra?.payer) {
+    const p = String(extra.payer)
+    parts.push(`payer=${p.length > 40 ? p.slice(0, 40) + '...' : p}`)
+  }
+  if (extra?.error) parts.push(`error=${String(extra.error).slice(0, 80)}`)
+  console.log(parts.join(' '))
 }
 
 function logError(context: string, error: unknown): void {
-  const msg = error instanceof Error ? error.message : String(error)
-  console.error(`🔥 [${ts()}] ${context}: ${msg}`)
+  console.error(`🔥 ${context}: ${error instanceof Error ? error.message : String(error)}`)
 }
 
 // ─── Payment Handler ────────────────────────────────────────────────────────
