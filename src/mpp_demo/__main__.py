@@ -1,4 +1,4 @@
-"""Allow running as `python -m mpp_demo.client ...`."""
-from mpp_demo.client import cli
+"""Allow running as `python -m mpp_demo ...`."""
+from mpp_demo.client.cli import cli
 
 cli()

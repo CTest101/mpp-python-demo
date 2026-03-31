@@ -27,7 +27,7 @@ from pytempo.models import Signature, as_address
 from pytempo.contracts.tip20 import TIP20
 
 from .config import TEMPO_CHAIN_ID, TEMPO_RPC, PATH_USD_ADDRESS
-from .signer import Signer
+from ..signer import Signer
 
 # ─── Contract Addresses ─────────────────────────────────────────────────────
 

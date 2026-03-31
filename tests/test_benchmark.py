@@ -3,7 +3,8 @@
 import time
 import pytest
 from mpp_demo.signer import LocalSigner
-from mpp_demo.session import SessionClient, SessionVerifier
+from mpp_demo.core.voucher import SessionClient
+from mpp_demo.server.verifier import SessionVerifier
 
 TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 TEST_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"

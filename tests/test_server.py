@@ -15,7 +15,7 @@ def anyio_backend():
 
 @pytest.mark.anyio
 async def test_root():
-    from mpp_demo.server import app
+    from mpp_demo.server.app import app
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/")
@@ -28,7 +28,7 @@ async def test_root():
 @pytest.mark.anyio
 async def test_joke_returns_402():
     """GET /joke without auth should return 402."""
-    from mpp_demo.server import app
+    from mpp_demo.server.app import app
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/joke")
@@ -40,7 +40,7 @@ async def test_joke_returns_402():
 @pytest.mark.anyio
 async def test_gallery_returns_402():
     """GET /gallery without auth should return 402."""
-    from mpp_demo.server import app
+    from mpp_demo.server.app import app
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/gallery/charge")

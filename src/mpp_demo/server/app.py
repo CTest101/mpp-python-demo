@@ -5,7 +5,7 @@ Session 端点使用标准 HTTP 402 Payment Authentication Scheme:
   GET /gallery + Authorization: Payment {action: "open/voucher/close"} → 200
 
 启动:
-  MPP_RECIPIENT=0x... MPP_SERVER_PRIVATE_KEY=0x... uv run uvicorn mpp_demo.server:app --port 8000
+  MPP_RECIPIENT=0x... MPP_SERVER_PRIVATE_KEY=0x... uv run uvicorn mpp_demo.server.app:app --port 8000
 """
 
 from __future__ import annotations
@@ -24,16 +24,17 @@ from mpp.methods.tempo import tempo, ChargeIntent, TESTNET_CHAIN_ID, PATH_USD
 
 from mpp.errors import PaymentError, VerificationError
 
-from .config import CHARGE_AMOUNT, SESSION_AMOUNT, RECIPIENT
-from .session import SessionVerifier, Voucher, ESCROW_CONTRACT
-from .onchain import EscrowClient, ESCROW_ADDRESS
-from .protocol import (
+from ..core.config import CHARGE_AMOUNT, SESSION_AMOUNT, RECIPIENT
+from ..core.voucher import Voucher, ESCROW_CONTRACT
+from ..core.escrow import EscrowClient, ESCROW_ADDRESS
+from ..core.protocol import (
     PaymentChallenge,
     build_session_challenge,
     parse_credential_from_request,
     build_session_receipt,
     _b64url_encode,
 )
+from .verifier import SessionVerifier
 
 app = FastAPI(title="MPP Demo Server", version="0.2.0")
 
@@ -101,7 +102,7 @@ def _get_escrow_client() -> EscrowClient:
     if _escrow_client is None:
         if not _server_key:
             raise ValueError("MPP_SERVER_PRIVATE_KEY required for session close")
-        from .signer import LocalSigner
+        from ..signer import LocalSigner
         signer = LocalSigner(_server_key)
         _escrow_client = EscrowClient(signer=signer)
     return _escrow_client
@@ -235,7 +236,7 @@ async def gallery_session(request: Request):
         })
 
     # Verify challenge HMAC
-    from .protocol import verify_challenge_hmac
+    from ..core.protocol import verify_challenge_hmac
     if not verify_challenge_hmac(credential["challenge"], _secret_key):
         return JSONResponse(status_code=402, content={
             "type": "https://paymentauth.org/problems/invalid-challenge",
@@ -269,8 +270,8 @@ async def _handle_session_open(credential: dict, payload: dict) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": "channelId and transaction required"})
 
     # Broadcast the signed transaction
-    from .onchain import _send_tx, _wait_for_receipt
-    from .config import TEMPO_RPC
+    from ..core.escrow import _send_tx, _wait_for_receipt
+    from ..core.config import TEMPO_RPC
     try:
         tx_hash = await _send_tx(TEMPO_RPC, transaction)
         await _wait_for_receipt(TEMPO_RPC, tx_hash)

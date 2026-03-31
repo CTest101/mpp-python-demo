@@ -18,9 +18,9 @@ from typing import Any
 
 import httpx
 
-from .config import TEMPO_CHAIN_ID
-from .onchain import EscrowClient, ESCROW_ADDRESS
-from .protocol import (
+from ..core.config import TEMPO_CHAIN_ID
+from ..core.escrow import EscrowClient, ESCROW_ADDRESS
+from ..core.protocol import (
     PaymentChallenge,
     build_authorization_header,
     close_payload,
@@ -29,8 +29,8 @@ from .protocol import (
     parse_receipt,
     voucher_payload,
 )
-from .session import SessionClient, compute_voucher_digest
-from .signer import Signer
+from ..core.voucher import SessionClient, compute_voucher_digest
+from ..signer import Signer
 
 
 @dataclass
@@ -65,7 +65,7 @@ class SessionHttpClient:
     _receipts: list[dict] = field(init=False, default_factory=list, repr=False)
 
     def __post_init__(self):
-        from .config import TEMPO_RPC, PATH_USD_ADDRESS
+        from ..core.config import TEMPO_RPC, PATH_USD_ADDRESS
 
         rpc = self.rpc_url or TEMPO_RPC
         self._http = httpx.AsyncClient(timeout=60.0)
