@@ -178,6 +178,35 @@ async def session_onchain_gallery(signer: Signer, server: str, count: int = 5, d
     return results
 
 
+# ─── Session HTTP Mode (real 402 protocol) ───────────────────────────────────
+
+async def session_http_gallery(signer: Signer, server: str, count: int = 5, deposit: int = 1_000_000) -> list[dict]:
+    """Session HTTP — real 402 protocol flow with mppx JS server."""
+    from .session_http import SessionHttpClient
+
+    results = []
+    async with SessionHttpClient(signer=signer, max_deposit=deposit) as client:
+        for i in range(count):
+            response = await client.fetch(f"{server}/gallery")
+
+            if response.status_code != 200:
+                print(f"  [{i+1}] ❌ HTTP {response.status_code}: {response.text[:200]}")
+                break
+
+            data = response.json()
+            results.append(data)
+            img = data.get("image", {})
+            print(f"  [{i+1}] {img.get('title', '?')} | cumulative: ${client.cumulative_amount / 1e6:.4f}")
+
+        # Close channel
+        print(f"\n  ⛓️  Closing channel (cumulative: ${client.cumulative_amount / 1e6:.4f})...")
+        receipt = await client.close(f"{server}/gallery")
+        if receipt:
+            print(f"  📊 Receipts collected: {len(client.receipts)}")
+
+    return results
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
@@ -197,6 +226,10 @@ async def main() -> None:
     sop.add_argument("--count", type=int, default=5)
     sop.add_argument("--deposit", type=int, default=1_000_000, help="Deposit in base units (default $1.00)")
     sop.add_argument("--server", default=SERVER_HOST)
+    shp = sub.add_parser("session-http", help="Buy images (real 402 session protocol, mppx server)")
+    shp.add_argument("--count", type=int, default=5)
+    shp.add_argument("--deposit", type=int, default=1_000_000, help="Deposit in base units (default $1.00)")
+    shp.add_argument("--server", default="http://localhost:5555")
 
     args = parser.parse_args()
     signer = signer_from_env()
@@ -228,6 +261,11 @@ async def main() -> None:
             print(f"\n⛓️  Session On-chain — buying {args.count} images (real escrow)...")
             results = await session_onchain_gallery(signer, args.server, args.count, args.deposit)
             print(f"📊 Got {len(results)} images (on-chain escrow!)")
+
+        elif args.command == "session-http":
+            print(f"\n🌐 Session HTTP (402 protocol) — buying {args.count} images...")
+            results = await session_http_gallery(signer, args.server, args.count, args.deposit)
+            print(f"📊 Got {len(results)} images (real 402 session protocol!)")
 
     except Exception as e:
         print(f"❌ Error: {type(e).__name__}: {e}")

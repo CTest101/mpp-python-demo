@@ -175,6 +175,38 @@ def _encode_get_voucher_digest(channel_id: bytes, cumulative_amount: int) -> str
 
 # ─── Transaction Builder ────────────────────────────────────────────────────
 
+async def _build_and_sign_tx(
+    signer: Signer,
+    calls: list[Call],
+    rpc_url: str = TEMPO_RPC,
+) -> str:
+    """Build and sign a TempoTransaction WITHOUT broadcasting.
+
+    Returns raw signed tx hex (0x-prefixed).
+    Used for mppx protocol where the server broadcasts via fee payer.
+    """
+    chain_id, nonce, gas_price = await _get_tx_params(rpc_url, signer.address)
+
+    tx = TempoTransaction.create(
+        chain_id=chain_id,
+        gas_limit=DEFAULT_GAS_LIMIT * len(calls),
+        max_fee_per_gas=gas_price,
+        max_priority_fee_per_gas=gas_price,
+        nonce=nonce,
+        nonce_key=0,
+        fee_token=PATH_USD_ADDRESS,
+        calls=tuple(calls),
+    )
+
+    signing_hash = tx.get_signing_hash(for_fee_payer=False)
+    sig_bytes = await signer.sign_hash(signing_hash)
+    sig = Signature.from_bytes(sig_bytes)
+    sender_addr = as_address(signer.address)
+    signed_tx = attrs.evolve(tx, sender_signature=sig, sender_address=sender_addr)
+
+    return "0x" + signed_tx.encode().hex()
+
+
 async def _build_and_send_tx(
     signer: Signer,
     calls: list[Call],
@@ -186,26 +218,7 @@ async def _build_and_send_tx(
 
     Returns tx hash.
     """
-    chain_id, nonce, gas_price = await _get_tx_params(rpc_url, signer.address)
-
-    tx = TempoTransaction.create(
-        chain_id=chain_id,
-        gas_limit=DEFAULT_GAS_LIMIT * len(calls),  # scale gas with number of calls
-        max_fee_per_gas=gas_price,
-        max_priority_fee_per_gas=gas_price,
-        nonce=nonce,
-        nonce_key=0,
-        fee_token=PATH_USD_ADDRESS,  # pay gas in pathUSD
-        calls=tuple(calls),
-    )
-
-    signing_hash = tx.get_signing_hash(for_fee_payer=False)
-    sig_bytes = await signer.sign_hash(signing_hash)
-    sig = Signature.from_bytes(sig_bytes)
-    sender_addr = as_address(signer.address)
-    signed_tx = attrs.evolve(tx, sender_signature=sig, sender_address=sender_addr)
-
-    raw_hex = "0x" + signed_tx.encode().hex()
+    raw_hex = await _build_and_sign_tx(signer, calls, rpc_url)
     tx_hash = await _send_tx(rpc_url, raw_hex)
 
     if wait_receipt:
@@ -259,6 +272,38 @@ class EscrowClient:
         )
 
         return tx_hash, channel_id
+
+    async def sign_approve_and_open(
+        self,
+        payee: str,
+        deposit: int,
+        salt: bytes,
+        authorized_signer: str = "0x0000000000000000000000000000000000000000",
+    ) -> tuple[str, str]:
+        """Sign approve+open tx WITHOUT broadcasting. Server will broadcast.
+
+        Returns (raw_signed_tx_hex, channel_id_hex).
+        Used for mppx protocol where the server broadcasts the tx via fee payer.
+        """
+        # Build approve call via TIP20 helper
+        tip20 = TIP20(self.token_address)
+        approve_call = tip20.approve(spender=self.escrow_address, amount=deposit)
+
+        # Build open call
+        open_data = _encode_open(payee, self.token_address, deposit, salt, authorized_signer)
+        open_call = Call.create(to=self.escrow_address, value=0, data=open_data)
+
+        # Build and sign tx (but don't broadcast)
+        raw_tx_hex = await _build_and_sign_tx(
+            self.signer, [approve_call, open_call], self.rpc_url
+        )
+
+        # Compute channel ID off-chain
+        channel_id = await self.compute_channel_id(
+            self.signer.address, payee, salt, authorized_signer
+        )
+
+        return raw_tx_hex, channel_id
 
     async def settle(
         self, channel_id: str, cumulative_amount: int, signature: bytes
