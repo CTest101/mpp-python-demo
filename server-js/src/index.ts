@@ -195,14 +195,25 @@ async function handler(request: Request): Promise<Response> {
         return result.challenge
       }
 
+      // Verify we actually have a valid credential
+      if (!result.credential) {
+        stats.errors++
+        logResponse(request, 500, startMs, { error: 'charge verified but no credential' })
+        return Response.json(
+          { error: 'Payment verification incomplete', detail: 'No credential in result' },
+          { status: 500 },
+        )
+      }
+
       stats.charge200++
       const joke = randomChoice(JOKES)
+      const payer = result.credential.source ?? 'unknown'
       logResponse(request, 200, startMs, {
         intent: 'charge',
-        payer: result.credential.source,
+        payer,
       })
       return result.withReceipt(
-        Response.json({ joke, payer: result.credential.source }),
+        Response.json({ joke, payer }),
       )
     } catch (e) {
       stats.errors++
