@@ -184,7 +184,6 @@ async function handler(request: Request): Promise<Response> {
   if (url.pathname === '/joke') {
     logRequest(request)
     try {
-      console.log(`🔍 /joke: calling mppx.charge()...`)
       const result = await mppx.charge({
         amount: '0.01',
         description: 'One programmer joke',
