@@ -184,6 +184,7 @@ async function handler(request: Request): Promise<Response> {
   if (url.pathname === '/joke') {
     logRequest(request)
     try {
+      console.log(`🔍 /joke: calling mppx.charge()...`)
       const result = await mppx.charge({
         amount: '0.01',
         description: 'One programmer joke',
@@ -195,25 +196,11 @@ async function handler(request: Request): Promise<Response> {
         return result.challenge
       }
 
-      // Verify we actually have a valid credential
-      if (!result.credential) {
-        stats.errors++
-        logResponse(request, 500, startMs, { error: 'charge verified but no credential' })
-        return Response.json(
-          { error: 'Payment verification incomplete', detail: 'No credential in result' },
-          { status: 500 },
-        )
-      }
-
       stats.charge200++
       const joke = randomChoice(JOKES)
-      const payer = result.credential.source ?? 'unknown'
-      logResponse(request, 200, startMs, {
-        intent: 'charge',
-        payer,
-      })
+      logResponse(request, 200, startMs, { intent: 'charge' })
       return result.withReceipt(
-        Response.json({ joke, payer }),
+        Response.json({ joke }),
       )
     } catch (e) {
       stats.errors++
